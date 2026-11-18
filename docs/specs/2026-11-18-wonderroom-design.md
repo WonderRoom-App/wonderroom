@@ -209,6 +209,11 @@ plugin page.
   message.
 - **Item fields on pages.** A theme can't know about ribbon size or coin grade. Each item type
   gives the engine `publicRows`, a list of label and value rows. The theme only shows the list.
+- **Item URLs.** One engine function builds every item URL: pages, cards, rich-text links and
+  the sitemap. After DT parity, item URLs get optional text after the id:
+  `/typewriters/15-smith-corona-sterling` is item 15. The id alone finds the item. If the
+  text is missing or out of date, the server redirects to the current URL. A title change
+  then never breaks a link. Until parity, the function builds plain `/<path>/<id>` URLs.
 
 Owners of DT's other pages: `/parts`, `/loans` and `/report` read core fields, so they are
 engine pages. `/groups/[slug]` belongs to the Condition add-on with restoration groups.
@@ -303,18 +308,41 @@ third-party install and build-cache path (step 3 above), full themes, or npm pub
 image is built straight from the engine repo's workspaces. The design above stays, so those
 pieces can come later without a redesign. (My call, from the builder check.)
 
-### Migrations: a known risk
+### Migrations: generated per install, inside an engine guard
 
-Payload migrations today are one chain per project, generated from the whole config. With
-plugins picked at start there is no single repo to hold that chain. Table names also depend
-on the slug an owner picks.
+**Decided after the M0 test build (Joel, 2026-11-18).** Evidence:
+`docs/spikes/2026-11-18-migrations-findings.md`.
 
-This is the biggest unknown in the design. **Spike it first**, before other engine work. The
-spike answers: can each plugin ship its own migrations, run in `requires` order, with table
-names taken from its slug? Or does the engine generate and apply the schema at start? What
-happens to data when an owner removes a plugin?
+Plugins don't ship migrations. Polymorphic relationship tables and Payload's own
+`payload_locked_documents_rels` get a column for every collection, so only a diff of the
+whole config can own them. At start the engine runs the stock `payload migrate:create`, then
+`payload migrate`. The migration files and snapshots live in a volume, beside the database.
 
-(Known local gotcha: `payload migrate` hangs on the dev push marker. See the local dev notes.)
+The stock tools fail quietly with no terminal, so the engine wraps them in a guard:
+
+- **Ambiguity:** before the diff, find anything that disappears while something similar
+  appears: columns, enums, child tables, whole tables. If a plugin declared that rename, the
+  engine writes the rename migration and a matching snapshot. If not, the start stops and
+  names what it found.
+- **Renames:** a plugin version ships a rename list (`field`, `to`, `since`).
+- **Data loss:** if the generated SQL holds `DROP TABLE`, `DROP COLUMN`, `DROP TYPE`,
+  `SET DATA TYPE`, or a `NOT NULL` with no default on a table with rows, the start stops and
+  shows the SQL. The owner either puts the plugin back or confirms the change in
+  `plugins.yml`. A confirmation also answers "new, not renamed" when one plugin is swapped for
+  another. The engine makes a `pg_dump` before it applies a confirmed change.
+- **Relationship shape changes** (single to many) need a data move. Version 1 stops the start
+  with a clear message.
+- **Never hang or pass silently:** a time limit on every step; stop if a diff was expected and
+  no file appeared; stop if `payload_migrations` holds a `dev` push row.
+- **Undo a failed apply:** delete the generated files, so the snapshot never gets ahead of the
+  database.
+- **One start at a time:** a Postgres advisory lock around the whole step.
+- **A slug is fixed once created.** Rich-text references store the slug inside JSON, where no
+  schema diff can see it. A changed slug for an existing item type stops the start. The owner
+  changes the label or the URL path instead, so routes must not equal the slug.
+
+The guard reads Drizzle's snapshot format, which is not a public Payload API. Pin Payload, and
+run the M0 experiments as guard tests on every upgrade.
 
 ### Outbound requests
 
