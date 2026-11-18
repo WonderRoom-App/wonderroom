@@ -1,0 +1,5 @@
+[10:52:37] [33mWARN[39m: [36mNo email adapter provided. Email will be written to console. More info at https://payloadcms.com/docs/email/overview.[39m
+[?25l[2K[1G[36m?[39m [1mNo schema changes detected. Would you like to create a blank migration file?[22m [90m›[39m [90m(y/N)[39m[10:52:37] [32mINFO[39m: [36mStarting migration: generating UP statements...[39m
+[10:52:37] [32mINFO[39m: [36mMigration UP complete. Generating DOWN statements...[39m
+[10:52:37] [32mINFO[39m: [36mMigration DOWN statements generation complete.[39m
+exit: 0

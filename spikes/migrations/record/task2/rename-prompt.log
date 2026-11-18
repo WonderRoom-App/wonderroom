@@ -1,0 +1,6 @@
+[10:43:39] [33mWARN[39m: [36mNo email adapter provided. Email will be written to console. More info at https://payloadcms.com/docs/email/overview.[39m
+[?25l
+Is ribbon_width column in typewriters table created or renamed from another column?
+❯ + ribbon_width               create column
+  ~ ribbon_size › ribbon_width rename column[10:43:40] [32mINFO[39m: [36mStarting migration: generating UP statements...[39m
+exit: 0
