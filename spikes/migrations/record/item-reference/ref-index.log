@@ -1,0 +1,10 @@
+[16:24:52] [33mWARN[39m: [36mNo email adapter provided. Email will be written to console. More info at https://payloadcms.com/docs/email/overview.[39m
+ids: {"typewriter":1,"coin":1}
+index rows: [[2,"coins",1,"Athenian owl"],[1,"typewriters",1,"Royal KMM"]]
+index title after rename: "Owl tetradrachm"
+featured: {"id":1,"machine":{"id":2,"itemType":"coins","itemId":1,"title":"Owl tetradrachm","updatedAt":"2026-11-18T22:24:52.374Z","createdAt":"2026-11-18T22:24:52.359Z"},"updatedAt":"2026-11-18T22:24:52.381Z","createdAt":"2026-11-18T22:24:52.381Z"}
+bad reference: "rejected: Error: Failed query: insert into \"featured\" (\"id\", \"machine_id\", \"updated_at\", \"created_at\") values (default, $1, $2, $3) returning \"id\", \"machine_id\", \"updated"
+featured coins count: 1
+delete coin: "FAILED: Error: Failed query: delete from \"payload_preferences\" where \"payload_preferences\".\"key\" in ($1)\nparams: collection-items-2"
+featured after delete: [{"id":1,"machine":{"id":2,"itemType":"coins","itemId":1,"title":"Owl tetradrachm","updatedAt":"2026-11-18T22:24:52.374Z","createdAt":"2026-11-18T22:24:52.359Z"},"updatedAt":"2026-11-18T22:24:52.381Z","createdAt":"2026-11-18T22:24:52.381Z"}]
+index rows after delete: [[2,"coins",1],[1,"typewriters",1]]
