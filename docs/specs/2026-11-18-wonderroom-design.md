@@ -303,18 +303,29 @@ third-party install and build-cache path (step 3 above), full themes, or npm pub
 image is built straight from the engine repo's workspaces. The design above stays, so those
 pieces can come later without a redesign. (My call, from the builder check.)
 
-### Migrations: a known risk
+### Migrations: generated per install, inside an engine guard
 
-Payload migrations today are one chain per project, generated from the whole config. With
-plugins picked at start there is no single repo to hold that chain. Table names also depend
-on the slug an owner picks.
+**Proposed after the M0 test build; waiting for Joel's decision.** Evidence:
+`docs/spikes/2026-11-18-migrations-findings.md`.
 
-This is the biggest unknown in the design. **Spike it first**, before other engine work. The
-spike answers: can each plugin ship its own migrations, run in `requires` order, with table
-names taken from its slug? Or does the engine generate and apply the schema at start? What
-happens to data when an owner removes a plugin?
+Plugins don't ship migrations. Polymorphic relationship tables and Payload's own
+`payload_locked_documents_rels` get a column for every collection, so only a diff of the
+whole config can own them. At start the engine runs the stock `payload migrate:create`, then
+`payload migrate`. The migration files and snapshots live in a volume, beside the database.
 
-(Known local gotcha: `payload migrate` hangs on the dev push marker. See the local dev notes.)
+The stock tools fail quietly with no terminal, so the engine wraps them in a guard:
+
+- **Ambiguity:** before the diff, find any table where a column disappears and another
+  appears. If a plugin declared that rename, the engine writes the `RENAME COLUMN` migration
+  and edits the snapshot. If not, the start stops and names the columns.
+- **Renames:** a plugin version ships a rename list (`field`, `to`, `since`).
+- **Drops:** if the generated SQL holds `DROP TABLE` or `DROP COLUMN`, the start stops and
+  shows the SQL. The owner either puts the plugin back or confirms the removal in
+  `plugins.yml`. The engine makes a `pg_dump` before it applies a confirmed drop.
+- **Silent exits:** if a diff was expected and no migration file appeared, the start stops.
+
+The guard reads Drizzle's snapshot format, which is not a public Payload API. Pin Payload, and
+run the M0 experiments as guard tests on every upgrade.
 
 ### Outbound requests
 
