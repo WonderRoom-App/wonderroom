@@ -209,6 +209,11 @@ plugin page.
   message.
 - **Item fields on pages.** A theme can't know about ribbon size or coin grade. Each item type
   gives the engine `publicRows`, a list of label and value rows. The theme only shows the list.
+- **Item URLs.** One engine function builds every item URL: pages, cards, rich-text links and
+  the sitemap. After DT parity, item URLs get optional text after the id:
+  `/typewriters/15-smith-corona-sterling` is item 15. The id alone finds the item. If the
+  text is missing or out of date, the server redirects to the current URL. A title change
+  then never breaks a link. Until parity, the function builds plain `/<path>/<id>` URLs.
 
 Owners of DT's other pages: `/parts`, `/loans` and `/report` read core fields, so they are
 engine pages. `/groups/[slug]` belongs to the Condition add-on with restoration groups.
