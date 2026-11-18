@@ -305,7 +305,7 @@ pieces can come later without a redesign. (My call, from the builder check.)
 
 ### Migrations: generated per install, inside an engine guard
 
-**Proposed after the M0 test build; waiting for Joel's decision.** Evidence:
+**Decided after the M0 test build (Joel, 2026-11-18).** Evidence:
 `docs/spikes/2026-11-18-migrations-findings.md`.
 
 Plugins don't ship migrations. Polymorphic relationship tables and Payload's own
