@@ -332,6 +332,9 @@ The stock tools fail quietly with no terminal, so the engine wraps them in a gua
 - **Undo a failed apply:** delete the generated files, so the snapshot never gets ahead of the
   database.
 - **One start at a time:** a Postgres advisory lock around the whole step.
+- **A slug is fixed once created.** Rich-text references store the slug inside JSON, where no
+  schema diff can see it. A changed slug for an existing item type stops the start. The owner
+  changes the label or the URL path instead, so routes must not equal the slug.
 
 The guard reads Drizzle's snapshot format, which is not a public Payload API. Pin Payload, and
 run the M0 experiments as guard tests on every upgrade.
