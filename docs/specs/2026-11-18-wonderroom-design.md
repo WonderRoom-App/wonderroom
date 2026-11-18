@@ -315,14 +315,23 @@ whole config can own them. At start the engine runs the stock `payload migrate:c
 
 The stock tools fail quietly with no terminal, so the engine wraps them in a guard:
 
-- **Ambiguity:** before the diff, find any table where a column disappears and another
-  appears. If a plugin declared that rename, the engine writes the `RENAME COLUMN` migration
-  and edits the snapshot. If not, the start stops and names the columns.
+- **Ambiguity:** before the diff, find anything that disappears while something similar
+  appears: columns, enums, child tables, whole tables. If a plugin declared that rename, the
+  engine writes the rename migration and a matching snapshot. If not, the start stops and
+  names what it found.
 - **Renames:** a plugin version ships a rename list (`field`, `to`, `since`).
-- **Drops:** if the generated SQL holds `DROP TABLE` or `DROP COLUMN`, the start stops and
-  shows the SQL. The owner either puts the plugin back or confirms the removal in
-  `plugins.yml`. The engine makes a `pg_dump` before it applies a confirmed drop.
-- **Silent exits:** if a diff was expected and no migration file appeared, the start stops.
+- **Data loss:** if the generated SQL holds `DROP TABLE`, `DROP COLUMN`, `DROP TYPE`,
+  `SET DATA TYPE`, or a `NOT NULL` with no default on a table with rows, the start stops and
+  shows the SQL. The owner either puts the plugin back or confirms the change in
+  `plugins.yml`. A confirmation also answers "new, not renamed" when one plugin is swapped for
+  another. The engine makes a `pg_dump` before it applies a confirmed change.
+- **Relationship shape changes** (single to many) need a data move. Version 1 stops the start
+  with a clear message.
+- **Never hang or pass silently:** a time limit on every step; stop if a diff was expected and
+  no file appeared; stop if `payload_migrations` holds a `dev` push row.
+- **Undo a failed apply:** delete the generated files, so the snapshot never gets ahead of the
+  database.
+- **One start at a time:** a Postgres advisory lock around the whole step.
 
 The guard reads Drizzle's snapshot format, which is not a public Payload API. Pin Payload, and
 run the M0 experiments as guard tests on every upgrade.
