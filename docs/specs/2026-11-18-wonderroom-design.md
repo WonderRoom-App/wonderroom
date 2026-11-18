@@ -58,9 +58,11 @@ sections below say how.
 ## Constraints
 
 - Stack stays Payload v3, Next.js, Postgres and Node 24.
-- **Target hardware:** a DigitalOcean droplet. 2 GB of memory with swap is the minimum we test
-  on. 4 GB is comfortable. Measure a real `next build` of DT before we commit to these numbers.
-  A Raspberry Pi or a low-end NAS is not a target.
+- **Target hardware:** a mid-size DigitalOcean droplet. Build memory is not a design target;
+  owners size the machine to fit. Measured 2026-11-18: a clean `next build` of DT peaks at
+  about 2.5 GB total across its processes, on a 10-core machine. With the prebuilt image, a
+  first-party-only install never builds at all. A Raspberry Pi or a low-end NAS is not a
+  target.
 - **Privacy stays strict.** Today every public query uses `overrideAccess: false`, a `select`
   whitelist and the `PublicMachine` DTO, so private fields never reach the page. The engine must
   keep this guarantee for every plugin, including plugins we didn't write.
