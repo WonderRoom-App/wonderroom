@@ -140,11 +140,22 @@ Rules:
 - **Item type registry.** The engine keeps the list of loaded item types. Every place that
   names the three slugs today reads this list instead: home page groups, tags, focus
   expressions, statistics, timeline, search, relationships.
-- **Relationships to "any item".** Featured, Highlights and money events already use a
-  polymorphic relationship: `relationTo: ['typewriters', 'calculators', 'marvels']`. In the
-  engine the registry builds that list. DT's data shape stays the same. Adding an item type
-  later adds a column to those relationship tables, which a migration handles. (Builder check
-  correction; the first draft wrongly said the shape changes.)
+- **Relationships to "any item" go through an engine-owned index.** The engine owns an
+  `items` table: `itemType`, `itemId`, and a copy of the title for the admin picker. Hooks on
+  every item type create, update and delete its index row. Featured, Highlights, money events
+  and any plugin that points at "any item" use the engine's reference field, a normal
+  relationship to `items` with a real foreign key. No plugin uses Payload's polymorphic
+  `relationTo: [...]`. Adding an item type then changes no shared relationship table.
+  Evidence: `docs/spikes/2026-11-18-item-reference-findings.md`.
+  - **Delete rules.** Before an item is deleted, the engine finds every reference to it and
+    applies that reference's rule: Featured and Highlights drop their entry; money events
+    refuse the delete with a clear message. The foreign key stays underneath as the backstop.
+  - **A rebuild command** recreates the index from the item tables, for writes that skip
+    Payload (a restore, raw SQL). The start sequence checks the counts.
+  - Index ids never appear in a URL. Item types keep their own ids.
+  - Rich-text references keep storing the item type and id in JSON, as Payload does.
+  - DT today uses polymorphic relationships. DT's one-way migration fills `items` from the
+    item tables and moves those links onto it.
 
 ### The core item contract
 
