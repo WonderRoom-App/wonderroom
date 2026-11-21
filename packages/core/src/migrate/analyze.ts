@@ -68,6 +68,10 @@ export function analyzeSchemaChange(before: Snapshot, after: Snapshot): SchemaCh
   return change
 }
 
+// Payload names a child table "<parent>_<something>", and a versions table "_<parent>_v".
+// A plain relationship field called "parent" also makes a parent_id key, so the key alone is not enough.
+const hasPayloadChildName = (child: string, parent: string) => child.startsWith(`${parent}_`) || child === `_${parent}_v`
+
 const list = (names: string[]) => names.join(', ')
 const SLUG_NOTE = "A plugin's slug can't change once created. Change its label or URL path instead."
 // Payload keeps one "<table>_id" column per collection in these two tables.
@@ -87,7 +91,7 @@ export function planMigration(
     problems.push(
       keys.includes(null)
         ? `${problem} No migration exists yet, so nothing can be confirmed. This should not happen. Check the migrations folder.`
-        : `${problem} To allow this, add ${keys.length > 1 ? 'these lines' : 'this line'} to confirm: in plugins.yml:\n${keys.join("\n")}`,
+        : `${problem} To allow this, add ${keys.length > 1 ? 'these lines' : 'this line'} under confirm: in plugins.yml:\n${keys.join("\n")}`,
     )
 
   // Tables. A removed table is a child when it has a Payload parent key (parent_id or _parent_id)
@@ -96,7 +100,7 @@ export function planMigration(
   const parentOf = (table: string): string | undefined => {
     const foreignKeys = before.tables[findKey(before.tables, table) ?? '']?.foreignKeys ?? {}
     const parentKey = Object.values<any>(foreignKeys).find(
-      (fk) => fk.tableFrom === table && removedTableSet.has(fk.tableTo) && fk.tableTo !== table && fk.columnsFrom.some((column: string) => column === 'parent_id' || column === '_parent_id'),
+      (fk) => fk.tableFrom === table && removedTableSet.has(fk.tableTo) && fk.tableTo !== table && hasPayloadChildName(table, fk.tableTo) && fk.columnsFrom.some((column: string) => column === 'parent_id' || column === '_parent_id'),
     )
     return parentKey?.tableTo
   }
@@ -132,22 +136,33 @@ export function planMigration(
 
   // Enums. An enum is covered when every column that uses it sits in a covered table or a confirmed dropped column.
   const confirmedColumnKey = (table: string, column: string) => {
+    if (!change.removedColumns.some((removed) => removed.table === table && removed.column === column)) return undefined
     const key = keyFor(`drop column ${table}.${column}`)
     return key !== null && isConfirmed(key) ? key : undefined
   }
-  const enumCover = (enumName: string): { key: string; table: string } | undefined => {
+  const enumCover = (enumName: string): { key: string; table: string; retyped: boolean } | undefined => {
     const users = Object.values<any>(before.tables).flatMap((tableEntry) =>
       Object.values<any>(tableEntry.columns).filter((column) => column.type === enumName).map((column) => ({ table: tableEntry.name as string, column: column.name as string })),
     )
     if (users.length === 0) return undefined
-    const keys = users.map(({ table, column }) => ({ table, key: tableCoverKey(table) ?? confirmedColumnKey(table, column) }))
+    // A confirmed retype away from the enum frees the column too. Drizzle drops the enum in phase 2.
+    const retypeKey = (table: string, column: string) => {
+      const key = keyFor(`retype ${table}.${column}`)
+      const retyped = change.retypedColumns.some((entry) => entry.table === table && entry.column === column && entry.from === enumName)
+      return retyped && key !== null && isConfirmed(key) ? key : undefined
+    }
+    const keys = users.map(({ table, column }) => {
+      const removedKey = tableCoverKey(table) ?? confirmedColumnKey(table, column)
+      return { table, key: removedKey ?? retypeKey(table, column), retyped: removedKey === undefined }
+    })
     if (keys.some(({ key }) => key === undefined)) return undefined
-    return { key: keys[0].key!, table: keys[0].table }
+    return { key: keys[0].key!, table: keys[0].table, retyped: keys.some((entry) => entry.retyped) }
   }
   const uncoveredEnums: string[] = []
   for (const enumName of change.removedEnums) {
     const cover = enumCover(enumName)
-    if (cover) removals.push({ ...cover, enum: enumName })
+    if (cover?.retyped) continue
+    if (cover) removals.push({ key: cover.key, table: cover.table, enum: enumName })
     else uncoveredEnums.push(enumName)
   }
   if (uncoveredEnums.length) {
@@ -208,6 +223,21 @@ export function planMigration(
 
 export function removeFromSnapshot(before: Snapshot, removals: Removal[]): Snapshot {
   const snapshot = structuredClone(before)
+  const removeColumn = (tableEntry: any, column: string) => {
+    delete tableEntry.columns[column]
+    // Postgres drops the indexes, foreign keys and constraints on a dropped column. The snapshot must agree.
+    for (const [name, index] of Object.entries<any>(tableEntry.indexes ?? {})) {
+      if (index.columns?.some((entry: any) => entry.expression === column)) delete tableEntry.indexes[name]
+    }
+    for (const [name, foreignKey] of Object.entries<any>(tableEntry.foreignKeys ?? {})) {
+      if (foreignKey.columnsFrom?.includes(column)) delete tableEntry.foreignKeys[name]
+    }
+    for (const section of ['uniqueConstraints', 'checkConstraints', 'compositePrimaryKeys']) {
+      for (const [name, constraint] of Object.entries<any>(tableEntry[section] ?? {})) {
+        if (constraint.columns?.includes(column)) delete tableEntry[section][name]
+      }
+    }
+  }
   for (const { table, column, enum: enumName } of removals) {
     if (enumName !== undefined) {
       delete snapshot.enums[findKey(snapshot.enums, enumName) ?? '']
@@ -215,8 +245,17 @@ export function removeFromSnapshot(before: Snapshot, removals: Removal[]): Snaps
     }
     const tableKey = findKey(snapshot.tables, table)
     if (tableKey === undefined) continue
-    if (column === undefined) delete snapshot.tables[tableKey]
-    else delete snapshot.tables[tableKey].columns[column]
+    if (column !== undefined) {
+      removeColumn(snapshot.tables[tableKey], column)
+      continue
+    }
+    delete snapshot.tables[tableKey]
+    // Postgres drops foreign keys that point at a dropped table.
+    for (const other of Object.values<any>(snapshot.tables)) {
+      for (const [name, foreignKey] of Object.entries<any>(other.foreignKeys ?? {})) {
+        if (foreignKey.tableTo === table) delete other.foreignKeys[name]
+      }
+    }
   }
   return snapshot
 }

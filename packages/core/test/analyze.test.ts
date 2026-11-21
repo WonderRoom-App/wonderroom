@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { describe, expect, test } from 'vitest'
 import { analyzeSchemaChange, planMigration, removeFromSnapshot, type SchemaChange, type Snapshot } from '../src/migrate/analyze'
 
@@ -19,6 +21,7 @@ const LATEST = '20261118_164300_wonderroom'
 const emptySnapshot = snapshot({})
 const plan = (change: SchemaChange, confirm: string[] = [], tablesWithRows: string[] = [], latestMigration: string | null = LATEST, before: Snapshot = emptySnapshot) =>
   planMigration(change, { confirm, latestMigration, tablesWithRows: new Set(tablesWithRows), before })
+const task2 = (file: string) => JSON.parse(readFileSync(new URL(`../../../spikes/migrations/record/task2/${file}`, import.meta.url), 'utf8'))
 // Adds a Payload-style parent foreign key (child.<column> -> parent.id) to a snapshot.
 const withParentKey = (snap: Snapshot, child: string, parent: string, column = 'parent_id'): Snapshot => {
   snap.tables[`public.${child}`].foreignKeys = {
@@ -239,5 +242,61 @@ describe('removeFromSnapshot', () => {
     expect(Object.keys(after.enums)).toEqual(['public.enum_other_s'])
     expect(Object.keys(after.tables['public.other'].columns)).toEqual(['a'])
     expect(Object.keys(before.tables)).toHaveLength(4)
+  })
+})
+
+describe('child tables need Payload names', () => {
+  test('a relationship field named parent does not make another collection a child', () => {
+    const before = withParentKey(snapshot({ coins: {}, stamps: { parent_id: {} } }), 'stamps', 'coins')
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'stamps'] }), [dropKey()], ['stamps'], LATEST, before))
+    expect(message).toContain(`drop table stamps @ ${LATEST}`)
+  })
+  test('versions tables chain to their collection', () => {
+    const before = snapshot({ coins: {}, _coins_v: {}, _coins_v_rels: {} })
+    withParentKey(before, '_coins_v', 'coins')
+    withParentKey(before, '_coins_v_rels', '_coins_v')
+    const result = plan(emptyChange({ removedTables: ['coins', '_coins_v', '_coins_v_rels'] }), [dropKey()], [], LATEST, before)
+    expect(result.kind === 'apply' && result.removals.map((r) => r.table)).toEqual(['coins', '_coins_v', '_coins_v_rels'])
+  })
+})
+const dropKey = () => `drop table coins @ ${LATEST}`
+
+describe('enum retype and made-up column keys', () => {
+  const before = snapshot({ coins: { status: { type: 'enum_coins_status' } } }, ['enum_coins_status'])
+  const change = emptyChange({
+    removedEnums: ['enum_coins_status'],
+    retypedColumns: [{ table: 'coins', column: 'status', from: 'enum_coins_status', to: 'varchar' }],
+  })
+  test('a confirmed retype away from an enum covers the enum, with no removal', () => {
+    expect(plan(change, [`retype coins.status @ ${LATEST}`], [], LATEST, before)).toEqual({ kind: 'apply', removals: [] })
+  })
+  test('an unconfirmed retype away from an enum stops', () => {
+    expect(plan(change, [], [], LATEST, before).kind).toBe('stop')
+  })
+  test('a drop column key for a column that was not removed is ignored', () => {
+    const key = `drop column coins.status @ ${LATEST}`
+    expect(plan(change, [key], [], LATEST, before).kind).toBe('stop')
+  })
+})
+
+test('the hint says where the line goes', () => {
+  expect(stopMessage(plan(emptyChange({ removedTables: ['coins'] })))).toContain('add this line under confirm: in plugins.yml:')
+})
+
+describe('removeFromSnapshot against drizzle-kit', () => {
+  test('phase 2 after a confirmed collection drop has nothing left to drop', async () => {
+    const { generateMigration } = createRequire(import.meta.url)('drizzle-kit/api')
+    const before = task2('20261118_164330_add_office.json')
+    const after = task2('20261118_164426_remove_coins.json.rejected')
+    for (const name of ['public.typewriters', 'public.office_machines']) after.tables[name] = before.tables[name]
+    const latest = '20261118_164330_add_office'
+    const result = planMigration(analyzeSchemaChange(before, after), {
+      confirm: [`drop table coins @ ${latest}`, `drop column featured_rels.coins_id @ ${latest}`], latestMigration: latest, tablesWithRows: new Set(), before,
+    })
+    if (result.kind !== 'apply') throw new Error(result.kind === 'stop' ? result.message : 'none')
+    const reduced = removeFromSnapshot(before, result.removals)
+    const phaseOne: string[] = await generateMigration(before, reduced)
+    expect(phaseOne.join('\n')).toContain('DROP TABLE "coins"')
+    expect(await generateMigration(reduced, after)).toEqual([])
   })
 })
