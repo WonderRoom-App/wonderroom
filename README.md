@@ -59,6 +59,8 @@ Each message says what to do.
 
 Relative paths count from the `app` folder.
 
+WonderRoom turns off Payload's telemetry by default. Your catalog sends no usage data to Payload.
+
 ## Confirm lines
 
 Some changes can destroy data. Removing a plugin drops its tables. Changing a field type or removing a select option can lose values.

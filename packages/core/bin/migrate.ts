@@ -1,5 +1,6 @@
 // `npm run migrate -w app`: brings the database in line with the config, or stops and says why.
-// Runs under `payload run`, which exits 0 once this module finishes, so failures must exit 1 here.
+// Runs under `payload run`. This module sets the exit code itself: 1 on failure, 0 on success,
+// so nothing left open (a socket, a timer) can keep the process alive after the work is done.
 import type { PostgresAdapter } from '@payloadcms/db-postgres'
 import { dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -20,6 +21,7 @@ try {
   } finally {
     await payload.destroy()
   }
+  process.exit(0)
 } catch (error) {
   console.error(error instanceof StartError ? error.message : error)
   process.exit(1)

@@ -15,8 +15,8 @@ export type EngineOptions = {
   catalog: Catalog
   configDir: string
   dataDir: string
-  databaseUrl: string
-  secret: string
+  databaseUrl: string | undefined
+  secret: string | undefined
   /** Where Payload looks for the admin import map. */
   importMapBaseDir?: string
   /** Where Payload writes the generated types. */
@@ -61,7 +61,14 @@ function rejectNestedItemReferences(plugin: WonderRoomPlugin): void {
   }
 }
 
+function requireSetting(variable: string, value: string | undefined): string {
+  if (!value) throw new StartError(`${variable} is not set. Set it in app/.env. app/.env.example shows what it looks like.`)
+  return value
+}
+
 export async function buildEngineConfig(options: EngineOptions): Promise<SanitizedConfig> {
+  const databaseUrl = requireSetting('DATABASE_URL', options.databaseUrl)
+  const secret = requireSetting('PAYLOAD_SECRET', options.secret)
   const install = loadInstall(options.configDir, options.catalog)
   install.plugins.forEach(rejectNestedItemReferences)
   const itemTypes = install.plugins.flatMap((plugin) =>
@@ -84,10 +91,12 @@ export async function buildEngineConfig(options: EngineOptions): Promise<Sanitiz
       ...addOns,
     ],
     editor: lexicalEditor(),
-    secret: options.secret,
+    secret,
+    // A self-hosted catalog sends nothing to Payload unless its owner turns this on.
+    telemetry: false,
     ...(options.typesOutputFile && { typescript: { outputFile: options.typesOutputFile } }),
     db: postgresAdapter({
-      pool: { connectionString: options.databaseUrl },
+      pool: { connectionString: databaseUrl },
       migrationDir: join(options.dataDir, 'migrations'),
       push: false,
     }),

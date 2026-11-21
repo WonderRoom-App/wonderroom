@@ -11,8 +11,8 @@ export default buildEngineConfig({
   catalog,
   configDir: path.resolve(appDir, process.env.WONDERROOM_CONFIG_DIR || '../config'),
   dataDir: path.resolve(appDir, process.env.WONDERROOM_DATA_DIR || '../data'),
-  databaseUrl: process.env.DATABASE_URL || '',
-  secret: process.env.PAYLOAD_SECRET || '',
+  databaseUrl: process.env.DATABASE_URL,
+  secret: process.env.PAYLOAD_SECRET,
   importMapBaseDir: dirname,
   typesOutputFile: path.resolve(dirname, 'payload-types.ts'),
 })

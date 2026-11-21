@@ -120,3 +120,30 @@ describe('item references', () => {
     ).toEqual({ field: 'item', path: ['parts', 'part'] })
   })
 })
+
+describe('engine settings', () => {
+  const options = (overrides: Record<string, string | undefined>) => ({
+    catalog,
+    configDir: mkdtempSync(join(tmpdir(), 'wonderroom-')),
+    dataDir: tmpdir(),
+    databaseUrl: 'postgres://localhost/unused',
+    secret: 'test-secret',
+    ...overrides,
+  })
+
+  it("turns off Payload's telemetry", async () => {
+    const opts = options({})
+    writeFileSync(join(opts.configDir, 'plugins.yml'), 'plugins: []\n')
+    expect((await buildEngineConfig(opts)).telemetry).toBe(false)
+  })
+
+  for (const [option, variable] of [['databaseUrl', 'DATABASE_URL'], ['secret', 'PAYLOAD_SECRET']]) {
+    it(`stops when ${variable} is missing`, async () => {
+      for (const missing of [undefined, '']) {
+        const attempt = buildEngineConfig(options({ [option]: missing }))
+        await expect(attempt).rejects.toThrow(StartError)
+        await expect(attempt).rejects.toThrow(`${variable} is not set. Set it in app/.env. app/.env.example shows what it looks like.`)
+      }
+    })
+  }
+})
