@@ -27,7 +27,7 @@ function buildItemTypeCollection(plugin: WonderRoomPlugin, itemType: ItemTypeDef
   for (const field of itemType.fields) {
     if ('name' in field && coreNames.has(field.name)) {
       throw new StartError(
-        `${plugin.name} adds a field named "${field.name}", which the engine already defines.`,
+        `${plugin.name} adds a field named "${field.name}", which the engine already defines. Rename the field in the plugin.`,
       )
     }
   }

@@ -67,13 +67,13 @@ describe('buildEngineConfig', () => {
   it('rejects a plugin field that the engine already defines', async () => {
     const attempt = build('plugins:\n  - use: clash\n')
     await expect(attempt).rejects.toThrow(StartError)
-    await expect(attempt).rejects.toThrow('clash adds a field named "title", which the engine already defines.')
+    await expect(attempt).rejects.toThrow('clash adds a field named "title", which the engine already defines. Rename the field in the plugin.')
   })
 
   it('names the collection and its labels from settings', async () => {
-    const config = await build('plugins:\n  - use: curios\n    slug: oddities\n    label: Oddity\n')
+    const config = await build('plugins:\n  - use: curios\n    slug: oddities\n    label: Oddity\n    labelPlural: Oddities\n')
     expect(config.collections[0].slug).toBe('oddities')
-    expect(config.collections[0].labels).toEqual({ singular: 'Oddity', plural: 'Odditys' })
+    expect(config.collections[0].labels).toEqual({ singular: 'Oddity', plural: 'Oddities' })
   })
 
   it('lists the item type slugs', async () => {
