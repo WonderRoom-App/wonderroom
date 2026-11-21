@@ -41,6 +41,7 @@ function makeInstall(root: string, databaseUrl: string) {
   mkdirSync(configDir)
   mkdirSync(dataDir)
   return {
+    databaseUrl,
     migrationsDir,
     dataDir,
     plugins(entries: Entry[], confirm: string[] = []) {
@@ -205,6 +206,19 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       expect(readFileSync(join(install.migrationsDir, 'index.ts'), 'utf8')).not.toContain(stray)
     }))
 
+  test('an empty database never clears the migration history', () =>
+    withInstall(async (install) => {
+      install.plugins([curios])
+      expectExit(await install.start(), 0)
+      const files = install.files()
+      await withTestDatabase(async (emptyUrl) => {
+        const stopped = await install.start({ DATABASE_URL: emptyUrl })
+        expectExit(stopped, 1)
+        expect(stopped.output).toContain(`The database has no migration history, but ${install.migrationsDir} holds 1 migrations. Check DATABASE_URL.`)
+      })
+      expect(install.files()).toEqual(files)
+    }))
+
   test('a dev push row stops the start', () =>
     withInstall(async (install) => {
       install.plugins([curios])
@@ -232,6 +246,31 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       expectExit(stopped, 1)
       expect(stopped.output).toContain('did not finish in 0.001 s. It may be waiting for an answer to a question. Nothing was applied.')
       expect(install.files()).toEqual(['index.ts'])
+    }))
+
+  test('a migrate step that runs too long is rolled back and cleaned up', () =>
+    withInstall(async (install) => {
+      install.plugins([coins])
+      expectExit(await install.start(), 0)
+      const files = install.files()
+      install.plugins([toy('coins', [text('material')])])
+      // migrate:create needs no database. migrate waits on this lock until the step limit kills it.
+      const blocker = new pg.Client({ connectionString: install.databaseUrl })
+      await blocker.connect()
+      try {
+        await blocker.query('BEGIN')
+        await blocker.query('LOCK TABLE coins IN ACCESS EXCLUSIVE MODE')
+        const stopped = await install.start({ WONDERROOM_STEP_TIMEOUT_MS: '15000' })
+        expectExit(stopped, 1)
+        expect(stopped.output).toContain(
+          `payload migrate did not finish in 15 s. Payload runs each migration in a transaction, so an unfinished one is rolled back. A backup from this start is in ${join(install.dataDir, 'backups')}, if one was taken.`,
+        )
+        expect(install.files()).toEqual(files)
+      } finally {
+        await blocker.end()
+      }
+      expectExit(await install.start(), 0)
+      expect(await install.sql(`select count(*)::int as n from information_schema.columns where table_name = 'coins' and column_name = 'material'`)).toEqual([{ n: 1 }])
     }))
 
   test('two starts at once apply each migration once', () =>

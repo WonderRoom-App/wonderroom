@@ -140,10 +140,12 @@ export function planMigration(
     const key = keyFor(`drop column ${table}.${column}`)
     return key !== null && isConfirmed(key) ? key : undefined
   }
-  const enumCover = (enumName: string): { key: string; table: string; retyped: boolean } | undefined => {
-    const users = Object.values<any>(before.tables).flatMap((tableEntry) =>
+  const enumUsers = (enumName: string) =>
+    Object.values<any>(before.tables).flatMap((tableEntry) =>
       Object.values<any>(tableEntry.columns).filter((column) => column.type === enumName).map((column) => ({ table: tableEntry.name as string, column: column.name as string })),
     )
+  const enumCover = (enumName: string): { key: string; table: string; retyped: boolean } | undefined => {
+    const users = enumUsers(enumName)
     if (users.length === 0) return undefined
     // A confirmed retype away from the enum frees the column too. Drizzle drops the enum in phase 2.
     const retypeKey = (table: string, column: string) => {
@@ -163,7 +165,11 @@ export function planMigration(
     const cover = enumCover(enumName)
     if (cover?.retyped) continue
     if (cover) removals.push({ key: cover.key, table: cover.table, enum: enumName })
-    else uncoveredEnums.push(enumName)
+    // An enum used only in removed tables is covered once the table drop is confirmed. The table's problem asks for that.
+    else {
+      const users = enumUsers(enumName)
+      if (users.length === 0 || users.some(({ table }) => !removedTableSet.has(table))) uncoveredEnums.push(enumName)
+    }
   }
   if (uncoveredEnums.length) {
     const swap = change.addedEnums.length ? ` Enum ${list(change.addedEnums)} is new. The engine can't tell a rename from a swap.` : ''

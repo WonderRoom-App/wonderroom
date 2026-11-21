@@ -125,6 +125,12 @@ describe('planMigration', () => {
       ],
     })
   })
+  test('an unconfirmed table drop does not list its enums separately', () => {
+    const before = snapshot({ coins: { status: { type: 'enum_coins_status' } } }, ['enum_coins_status'])
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins'], removedEnums: ['enum_coins_status'] }), [], [], LATEST, before))
+    expect(message).toContain(dropKey)
+    expect(message).not.toContain('enum_coins_status')
+  })
   test('an unrelated table with a matching prefix needs its own key', () => {
     const before = withParentKey(snapshot({ coins: {}, coins_rels: {}, coins_extra: {} }), 'coins_rels', 'coins')
     const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'coins_rels', 'coins_extra'] }), [dropKey], [], LATEST, before))

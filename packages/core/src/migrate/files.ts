@@ -11,9 +11,13 @@ export function migrationNames(dir: string): string[] {
   return [...new Set(names)].sort()
 }
 
-/** Deletes the files of every migration the database has not applied, then rewrites index.ts. */
+/**
+ * Deletes the files of migrations newer than the latest one the database applied, then rewrites index.ts.
+ * With nothing applied, every file goes: the caller makes sure the folder held none before this start.
+ */
 export function deleteUnapplied(dir: string, applied: Set<string>): string[] {
-  const deleted = readdirSync(dir).filter((file) => isMigrationFile(file) && !applied.has(file.split('.')[0]))
+  const latest = [...applied].sort().at(-1) ?? ''
+  const deleted = readdirSync(dir).filter((file) => isMigrationFile(file) && file.split('.')[0] > latest && !applied.has(file.split('.')[0]))
   for (const file of deleted) rmSync(join(dir, file))
   writeMigrationIndex({ migrationsDir: dir })
   return deleted

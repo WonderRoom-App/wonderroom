@@ -24,7 +24,7 @@ const timestamp = () => {
  * Runs one CLI step as a child process, with no stdin and a time limit. Its output goes to ours.
  * Resolves once the child has exited, so a killed step can't write files after the caller cleans up.
  */
-function runStep(step: string, command: string, args: string[]): Promise<void> {
+function runStep(step: string, command: string, args: string[], afterTimeout = 'It may be waiting for an answer to a question. Nothing was applied.'): Promise<void> {
   const limitMs = Number(process.env.WONDERROOM_STEP_TIMEOUT_MS ?? 300_000)
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -51,7 +51,7 @@ function runStep(step: string, command: string, args: string[]): Promise<void> {
     child.on('close', (code) => {
       clearTimeout(timer)
       if (timedOut) {
-        reject(new StartError(`${step} did not finish in ${limitMs / 1000} s. It may be waiting for an answer to a question. Nothing was applied.`))
+        reject(new StartError(`${step} did not finish in ${limitMs / 1000} s. ${afterTimeout}`))
       } else if (code !== 0) {
         const tail = stripVTControlCharacters(output).trim().split('\n').slice(-20).join('\n')
         reject(new StartError(`${step} failed. Fix the problem it names, then start again. It said:\n${tail}`))
@@ -132,6 +132,19 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
     )
   }
   const appliedNames = new Set(applied.map(({ name }) => name))
+  const folderNames = migrationNames(dir)
+  if (!applied.length && folderNames.length) {
+    throw new StartError(
+      `The database has no migration history, but ${dir} holds ${folderNames.length} migrations. Check DATABASE_URL. To start over on purpose, empty ${dir} first.`,
+    )
+  }
+  const latestApplied = [...appliedNames].sort().at(-1) ?? ''
+  const olderUnapplied = folderNames.filter((name) => name < latestApplied && !appliedNames.has(name))
+  if (olderUnapplied.length) {
+    throw new StartError(
+      `${dir} holds migrations older than the database's latest one that the database never applied: ${olderUnapplied.join(', ')}. Restore the folder from the backup taken with the database.`,
+    )
+  }
   // A start that died halfway leaves files the database never applied. They are not to be trusted.
   for (const file of deleteUnapplied(dir, appliedNames)) console.log(`Deleted ${file}, which the database never applied.`)
 
@@ -151,10 +164,10 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
   const plan = planMigration(change, { before, confirm: options.confirm, latestMigration: latestName, tablesWithRows: await tablesWithRows(query, change) })
   if (plan.kind === 'stop') throw new StartError(plan.message)
 
+  const backups = join(options.dataDir, 'backups')
   try {
     let reduced = before
     if (plan.kind === 'apply' && plan.removals.length) {
-      const backups = join(options.dataDir, 'backups')
       mkdirSync(backups, { recursive: true })
       const dump = join(backups, `before-${timestamp()}.dump`)
       await runStep('pg_dump', 'pg_dump', ['--format=custom', `--file=${dump}`, `--dbname=${db.poolOptions.connectionString}`])
@@ -185,7 +198,7 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
       }
     }
 
-    if (migrationNames(dir).some((name) => !appliedNames.has(name))) await runStep('payload migrate', 'payload', ['migrate'])
+    if (migrationNames(dir).some((name) => !appliedNames.has(name))) await runStep('payload migrate', 'payload', ['migrate'], `Payload runs each migration in a transaction, so an unfinished one is rolled back. A backup from this start is in ${backups}, if one was taken.`)
   } catch (error) {
     // The database is the record of what happened. Files it did not apply must not survive to the next start.
     const nowApplied = new Set((await appliedMigrations(query)).map(({ name }) => name))
