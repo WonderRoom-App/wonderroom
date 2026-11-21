@@ -2,7 +2,16 @@
   "name": "@wonderroom/core",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "test": "vitest run" },
-  "devDependencies": { "vitest": "4.0.18" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "4.0.18"
+  },
+  "peerDependencies": {
+    "payload": "3.94.1"
+  }
 }
