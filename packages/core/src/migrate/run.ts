@@ -1,10 +1,10 @@
 import type { PostgresAdapter } from '@payloadcms/db-postgres'
 import { spawn } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import type { Payload } from 'payload'
-import { escapeIdentifier } from 'pg'
+import pg, { escapeIdentifier } from 'pg'
 import { rebuildItemsIndex } from '../items'
 import { StartError } from '../plugin'
 import { msFromEnv } from './lock'
@@ -29,12 +29,12 @@ function runStep(
   step: string,
   command: string,
   args: string[],
-  options: { afterTimeout?: string; env?: Record<string, string> } = {},
+  options: { afterTimeout?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<void> {
-  const { afterTimeout = 'It may be waiting for an answer to a question. Nothing was applied.', env = {} } = options
+  const { afterTimeout = 'It may be waiting for an answer to a question. Nothing was applied.', env = process.env } = options
   const limitMs = msFromEnv('WONDERROOM_STEP_TIMEOUT_MS', 300_000)
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } })
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env })
     // If this process exits first (a lost lock, a crash), the step must not run on without it.
     const killChild = () => child.kill('SIGKILL')
     process.on('exit', killChild)
@@ -74,19 +74,23 @@ function runStep(
   })
 }
 
-/** pg_dump's arguments and environment. The connection, password included, goes in the environment only. */
-export function pgDumpCommand(databaseUrl: string, file: string): { args: string[]; env: Record<string, string> } {
-  const url = new URL(databaseUrl)
-  const settings = {
-    PGHOST: url.hostname,
-    PGPORT: url.port,
-    PGUSER: decodeURIComponent(url.username),
-    PGPASSWORD: decodeURIComponent(url.password),
-    PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
-    PGSSLMODE: url.searchParams.get('sslmode') ?? '',
-  }
-  const env = Object.fromEntries(Object.entries(settings).filter(([, value]) => value !== ''))
-  return { args: ['--format=custom', `--file=${file}`, '--no-password'], env }
+/**
+ * pg_dump's arguments and environment. node-pg fills any part the URL leaves out from PG* variables,
+ * so pg_dump gets the host, port, user and database node-pg resolved, and no PG* variable of its own.
+ * The password goes in the environment only, never in the arguments.
+ */
+export function pgDumpCommand(databaseUrl: string, file: string): { args: string[]; env: NodeJS.ProcessEnv } {
+  const resolved = new pg.Client({ connectionString: databaseUrl }) // resolves the settings; never connects
+  const quote = (value: string | number) => `'${String(value).replace(/[\\']/g, '\\$&')}'`
+  const settings = { host: resolved.host, port: resolved.port, user: resolved.user, dbname: resolved.database, sslmode: new URLSearchParams(databaseUrl.split('?')[1]).get('sslmode') }
+  const conninfo = Object.entries(settings)
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${key}=${quote(value!)}`)
+    .join(' ')
+  const env = { ...process.env }
+  for (const name of Object.keys(env)) if (name.startsWith('PG')) delete env[name]
+  if (resolved.password) env.PGPASSWORD = String(resolved.password)
+  return { args: ['--format=custom', `--file=${file}`, '--no-password', `--dbname=${conninfo}`], env }
 }
 
 async function appliedMigrations(query: Query): Promise<{ name: string; batch: string }[]> {
@@ -113,12 +117,19 @@ const columnType = (snapshot: Snapshot, table: string, column: string): string |
  * The statements in a generated migration's `up` that can lose data, minus the ones the owner confirmed
  * or the plan already checked. Phase 1 carried out the removals, so a DROP TABLE or DROP COLUMN here is never covered.
  */
-function uncoveredStatements(file: string, input: { before: Snapshot; change: SchemaChange; confirm: string[]; latest: string | null }): string[] {
+export function uncoveredStatements(file: string, input: { before: Snapshot; change: SchemaChange; confirm: string[]; latest: string | null }): string[] {
   const { before, change, confirm, latest } = input
   const confirmed = (action: string) => latest !== null && confirm.includes(`${action} @ ${latest}`)
   const text = readFileSync(file, 'utf8')
-  // The SQL inside up's sql`...` call. The `down` function follows it.
-  const up = text.slice(text.indexOf('export async function up'), text.indexOf('export async function down')).match(/sql`([\s\S]*)`\)/)?.[1] ?? ''
+  // All of up, whatever form its SQL takes. The `down` function follows it.
+  const upStart = text.indexOf('export async function up')
+  const downStart = text.indexOf('export async function down')
+  if (upStart === -1 || downStart < upStart) {
+    throw new StartError(
+      `${file} has no up function the engine can read. The engine checks each migration for statements that lose data, so it stopped. Nothing was applied. The installed Payload may not match this WonderRoom version. Run npm ci, then start again.`,
+    )
+  }
+  const up = text.slice(upStart, downStart)
   // Enums whose removed values the owner confirmed. Drizzle rebuilds such an enum with DROP TYPE and SET DATA TYPE.
   const rebuiltEnums = change.changedEnums
     .filter(({ enum: name, removedValues }) => removedValues.length && confirmed(`drop values ${name}.${removedValues.join(',')}`))
@@ -203,8 +214,16 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
     if (confirmedChange) {
       mkdirSync(backups, { recursive: true })
       const dump = join(backups, `before-${timestamp()}.dump`)
-      const { args, env } = pgDumpCommand(db.poolOptions.connectionString!, dump)
-      await runStep('the database backup', 'pg_dump', args, { env })
+      // pg_dump writes under another name, so a dump cut short never looks like a backup.
+      const partial = `${dump}.partial`
+      const { args, env } = pgDumpCommand(db.poolOptions.connectionString!, partial)
+      try {
+        await runStep('the database backup', 'pg_dump', args, { env })
+      } catch (error) {
+        rmSync(partial, { force: true })
+        throw error
+      }
+      renameSync(partial, dump)
       console.log(`Backed up the database to ${dump}.`)
     }
     if (plan.kind === 'apply' && plan.removals.length) {
