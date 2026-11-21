@@ -15,29 +15,42 @@ export type Install = {
 
 type Settings = Record<string, unknown>
 
-function readOptionalSettings(configDir: string, name: string): Settings {
-  const file = join(configDir, 'config.d', `${name}.yml`)
-  if (!existsSync(file)) return {}
-  return (parse(readFileSync(file, 'utf8')) as Settings | null) ?? {}
-}
-
-function readPluginsFile(configDir: string): { plugins?: unknown; confirm?: string[] } {
-  const file = join(configDir, 'plugins.yml')
-  if (!existsSync(file)) {
-    throw new StartError(`No plugins.yml in ${configDir}. Create one that lists your plugins.`)
-  }
+/** Reads a YAML file; `name` is the path shown in messages. */
+function readYaml(file: string, name: string): unknown {
   const document = parseDocument(readFileSync(file, 'utf8'))
   const [problem] = document.errors
   if (problem) {
     const line = problem.linePos?.[0].line ?? 1
-    throw new StartError(`plugins.yml line ${line}: ${problem.message.split('\n')[0]}`)
+    throw new StartError(`${name} line ${line}: ${problem.message.split('\n')[0]}`)
   }
-  return document.toJS() ?? {}
+  return document.toJS()
+}
+
+function readOptionalSettings(configDir: string, name: string): Settings {
+  const file = join(configDir, 'config.d', `${name}.yml`)
+  if (!existsSync(file)) return {}
+  const settings = readYaml(file, `config.d/${name}.yml`) ?? {}
+  if (typeof settings !== 'object' || Array.isArray(settings)) {
+    throw new StartError(`config.d/${name}.yml must be a mapping of settings.`)
+  }
+  return settings as Settings
+}
+
+function readPluginsFile(configDir: string): { plugins?: unknown; confirm?: unknown } {
+  const file = join(configDir, 'plugins.yml')
+  if (!existsSync(file)) {
+    throw new StartError(`No plugins.yml in ${configDir}. Create one that lists your plugins.`)
+  }
+  return (readYaml(file, 'plugins.yml') as object | null) ?? {}
 }
 
 export function loadInstall(configDir: string, catalog: Catalog): Install {
   const { plugins: entries, confirm } = readPluginsFile(configDir)
   if (!Array.isArray(entries)) throw new StartError('plugins.yml: "plugins" must be a list.')
+  const confirmLines = confirm ?? []
+  if (!Array.isArray(confirmLines) || !confirmLines.every((line) => typeof line === 'string')) {
+    throw new StartError('plugins.yml: "confirm" must be a list of text lines.')
+  }
 
   const plugins = entries.map((entry: Settings | null, index) => {
     const position = index + 1
@@ -48,19 +61,21 @@ export function loadInstall(configDir: string, catalog: Catalog): Install {
         `plugins.yml entry ${position} uses "from". Plugins from npm or git come in a later version.`,
       )
     }
-    const factory = catalog[use]
-    if (!factory) {
+    if (!Object.hasOwn(catalog, use)) {
       throw new StartError(
         `plugins.yml lists "${use}", which is not a known plugin. Known plugins: ${Object.keys(catalog).join(', ')}.`,
       )
     }
-    return factory({ ...readOptionalSettings(configDir, use), ...ownSettings })
+    return catalog[use]({ ...readOptionalSettings(configDir, use), ...ownSettings })
   })
 
   const site = readOptionalSettings(configDir, 'site')
+  if (site.name !== undefined && typeof site.name !== 'string') {
+    throw new StartError('config.d/site.yml: "name" must be text.')
+  }
   return {
-    site: { name: typeof site.name === 'string' ? site.name : 'WonderRoom' },
+    site: { name: site.name ?? 'WonderRoom' },
     plugins: orderPlugins(plugins),
-    confirm: confirm ?? [],
+    confirm: confirmLines,
   }
 }

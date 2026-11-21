@@ -92,4 +92,35 @@ describe('loadInstall', () => {
       'plugins.yml entry 1 uses "from". Plugins from npm or git come in a later version.',
     )
   })
+
+  it('names a config.d file with bad YAML', () => {
+    const dir = makeConfigDir({
+      'plugins.yml': 'plugins:\n  - use: curios\n',
+      'config.d/curios.yml': 'label: [x\n',
+    })
+    expect(messageOf(dir)).toMatch(/^config\.d\/curios\.yml line \d+:/)
+  })
+
+  it('needs a config.d file to be a mapping', () => {
+    const dir = makeConfigDir({
+      'plugins.yml': 'plugins:\n  - use: curios\n',
+      'config.d/curios.yml': 'hello\n',
+    })
+    expect(messageOf(dir)).toBe('config.d/curios.yml must be a mapping of settings.')
+  })
+
+  it('needs site name to be text', () => {
+    const dir = makeConfigDir({ 'plugins.yml': 'plugins: []\n', 'config.d/site.yml': 'name: 5\n' })
+    expect(messageOf(dir)).toContain('config.d/site.yml')
+  })
+
+  it('needs confirm to be a list of text lines', () => {
+    const dir = makeConfigDir({ 'plugins.yml': 'plugins: []\nconfirm: yes please\n' })
+    expect(messageOf(dir)).toBe('plugins.yml: "confirm" must be a list of text lines.')
+  })
+
+  it('does not treat object keys as plugins', () => {
+    const dir = makeConfigDir({ 'plugins.yml': 'plugins:\n  - use: constructor\n' })
+    expect(messageOf(dir)).toContain('which is not a known plugin')
+  })
 })
