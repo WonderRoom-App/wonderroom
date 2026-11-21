@@ -6,12 +6,17 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "typescript": "^5.7.3",
     "vitest": "4.0.18"
   },
   "peerDependencies": {
     "payload": "3.94.1"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }
