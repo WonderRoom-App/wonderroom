@@ -305,7 +305,8 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       } finally {
         await blocker.end()
       }
-      expectExit(await install.start(), 0)
+      // The killed step's backend can outlive it, queued for the lock. A bound makes a stuck start name its step.
+      expectExit(await install.start({ WONDERROOM_STEP_TIMEOUT_MS: '60000' }), 0)
       expect(await install.sql(`select count(*)::int as n from information_schema.columns where table_name = 'coins' and column_name = 'material'`)).toEqual([{ n: 1 }])
     }))
 

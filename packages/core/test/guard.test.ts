@@ -63,8 +63,10 @@ test('a dropped lock connection fails the start with a StartError', { timeout: 3
     try {
       const lockHolder = `select pid from pg_locks where locktype = 'advisory' and database = (select oid from pg_database where datname = current_database())`
       while ((await admin.query(lockHolder)).rows.length === 0) await new Promise((resolve) => setTimeout(resolve, 50))
+      // Handle the rejection before it can happen: it may land while the terminate query is in flight.
+      const failed = expect(locked).rejects.toThrow(/migration lock/)
       await admin.query(`select pg_terminate_backend(pid) from (${lockHolder}) holders`)
-      await expect(locked).rejects.toThrow(/migration lock/)
+      await failed
       await expect(locked).rejects.toBeInstanceOf(StartError)
     } finally {
       finish()

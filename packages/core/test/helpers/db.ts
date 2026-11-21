@@ -5,7 +5,7 @@ const serverUrl = 'postgres://postgres:postgres@localhost:5433/postgres'
 
 /**
  * Creates a database with a random name, runs `fn` against it, then drops it.
- * The drop forces off any connection left open, such as a start that outlived its test.
+ * The drop forces off any connection still open after a few seconds, such as a start that outlived its test.
  * It never touches a database it did not create.
  */
 export async function withTestDatabase<T>(fn: (databaseUrl: string) => Promise<T>): Promise<T> {
@@ -19,7 +19,12 @@ export async function withTestDatabase<T>(fn: (databaseUrl: string) => Promise<T
       url.pathname = `/${name}`
       return await fn(url.toString())
     } finally {
-      await server.query(`DROP DATABASE ${name} WITH (FORCE)`)
+      // A plain drop waits a few seconds for closing connections. Forcing it at once would cut off
+      // a pool that is still closing, and its client would throw. Force only what is still open.
+      await server.query(`DROP DATABASE ${name}`).catch((error) => {
+        if (error.code !== '55006') throw error // object_in_use
+        return server.query(`DROP DATABASE ${name} WITH (FORCE)`)
+      })
     }
   } finally {
     await server.end()
