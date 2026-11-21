@@ -8,6 +8,7 @@ import { Tags } from './collections/Tags'
 import { Users } from './collections/Users'
 import { coreItemFields, setYearRangeFromYear } from './coreFields'
 import { loadInstall, type Catalog } from './install'
+import { applyDeleteRules, findItemReferences, itemsCollection, removeIndexRow, syncIndexRow } from './items'
 import { StartError, type ItemTypeDefinition, type WonderRoomPlugin } from './plugin'
 
 export type EngineOptions = {
@@ -35,7 +36,12 @@ function buildItemTypeCollection(plugin: WonderRoomPlugin, itemType: ItemTypeDef
     slug: itemType.slug,
     labels: itemType.labels,
     admin: { useAsTitle: 'title' },
-    hooks: { beforeValidate: [setYearRangeFromYear] },
+    hooks: {
+      beforeValidate: [setYearRangeFromYear],
+      afterChange: [syncIndexRow],
+      beforeDelete: [applyDeleteRules],
+      afterDelete: [removeIndexRow],
+    },
     fields: [...coreItemFields, ...itemType.fields],
   }
 }
@@ -47,7 +53,7 @@ export async function buildEngineConfig(options: EngineOptions): Promise<Sanitiz
   )
   const addOns = install.plugins.flatMap((plugin) => plugin.collections ?? [])
 
-  return buildConfig({
+  const config = await buildConfig({
     admin: {
       user: Users.slug,
       ...(options.importMapBaseDir && { importMap: { baseDir: options.importMapBaseDir } }),
@@ -58,6 +64,7 @@ export async function buildEngineConfig(options: EngineOptions): Promise<Sanitiz
       Users,
       { ...Media, upload: { staticDir: join(options.dataDir, 'media') } },
       Tags,
+      itemsCollection,
       ...addOns,
     ],
     editor: lexicalEditor(),
@@ -76,6 +83,9 @@ export async function buildEngineConfig(options: EngineOptions): Promise<Sanitiz
       },
     },
   })
+  // Found after sanitizing, so fields inside rows and collapsibles count as top level.
+  config.custom.wonderroom.itemReferences = findItemReferences(config.collections)
+  return config
 }
 
 export function itemTypeSlugs(config: SanitizedConfig): string[] {

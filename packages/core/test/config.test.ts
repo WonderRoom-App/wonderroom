@@ -46,11 +46,11 @@ function build(pluginsYml: string, siteFiles: Record<string, string> = {}) {
 }
 
 describe('buildEngineConfig', () => {
-  it('orders item types first, then users, media, tags, then add-ons', async () => {
+  it('orders item types first, then users, media, tags, items, then add-ons', async () => {
     const config = await build('plugins:\n  - use: extras\n  - use: beta\n  - use: alpha\n')
     // Payload appends its own payload-* collections.
     expect(config.collections.map((c) => c.slug).filter((slug) => !slug.startsWith('payload-'))).toEqual([
-      'beta', 'alpha', 'users', 'media', 'tags', 'extras-things',
+      'beta', 'alpha', 'users', 'media', 'tags', 'items', 'extras-things',
     ])
   })
 
