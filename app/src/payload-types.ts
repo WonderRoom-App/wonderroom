@@ -67,8 +67,10 @@ export interface Config {
   };
   blocks: {};
   collections: {
+    curios: Curio;
     users: User;
     media: Media;
+    tags: Tag;
     'payload-kv': PayloadKv;
     'payload-locked-documents': PayloadLockedDocument;
     'payload-preferences': PayloadPreference;
@@ -76,15 +78,17 @@ export interface Config {
   };
   collectionsJoins: {};
   collectionsSelect: {
+    curios: CuriosSelect<false> | CuriosSelect<true>;
     users: UsersSelect<false> | UsersSelect<true>;
     media: MediaSelect<false> | MediaSelect<true>;
+    tags: TagsSelect<false> | TagsSelect<true>;
     'payload-kv': PayloadKvSelect<false> | PayloadKvSelect<true>;
     'payload-locked-documents': PayloadLockedDocumentsSelect<false> | PayloadLockedDocumentsSelect<true>;
     'payload-preferences': PayloadPreferencesSelect<false> | PayloadPreferencesSelect<true>;
     'payload-migrations': PayloadMigrationsSelect<false> | PayloadMigrationsSelect<true>;
   };
   db: {
-    defaultIDType: string;
+    defaultIDType: number;
   };
   fallbackLocale: null;
   globals: {};
@@ -119,10 +123,125 @@ export interface UserAuthOperations {
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "curios".
+ */
+export interface Curio {
+  id: number;
+  title: string;
+  /**
+   * Short public detail to tell near-identical titles apart. Appended to the title.
+   */
+  titleHint?: string | null;
+  /**
+   * Where this item stands. Public.
+   */
+  presence: 'collection' | 'parts' | 'departed';
+  /**
+   * Ad-hoc labels. Type to find or create.
+   */
+  tags?: (number | Tag)[] | null;
+  /**
+   * Year or range of manufacture (for example 1930, 1927-1929, "early 1949").
+   */
+  year?: string | null;
+  /**
+   * Sortable start year. Year stays the display text.
+   */
+  yearFrom?: number | null;
+  /**
+   * Only when the date is a range.
+   */
+  yearTo?: number | null;
+  /**
+   * Only when the date is known finer than a year. 1-12, qualifies Year from.
+   */
+  monthFrom?: number | null;
+  /**
+   * Qualifies Year to. Same as Month from for a single month.
+   */
+  monthTo?: number | null;
+  /**
+   * How the year was found. Anything other than Exact shows an estimate marker.
+   */
+  dateBasis?: ('exact' | 'interpolated' | 'model-range' | 'approximate') | null;
+  /**
+   * The first photo is the primary image.
+   */
+  photos?: (number | Media)[] | null;
+  description?: {
+    root: {
+      type: string;
+      children: {
+        type: any;
+        version: number;
+        [k: string]: unknown;
+      }[];
+      direction: ('ltr' | 'rtl') | null;
+      format: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | '';
+      indent: number;
+      version: number;
+    };
+    [k: string]: unknown;
+  } | null;
+  notes?: string | null;
+  /**
+   * Public origin and where it came from. Keep prices out.
+   */
+  provenance?: string | null;
+  /**
+   * Price paid and private seller details. Admin only.
+   */
+  acquisitionNotes?: string | null;
+  /**
+   * For example "Sold to Jane, 2025". Admin only.
+   */
+  disposition?: string | null;
+  onLoanTo?: string | null;
+  /**
+   * People who have asked to buy it. Admin only.
+   */
+  purchaseInterest?: string | null;
+  material?: string | null;
+  acquiredFrom?: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "tags".
+ */
+export interface Tag {
+  id: number;
+  name: string;
+  slug?: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "media".
+ */
+export interface Media {
+  id: number;
+  alt: string;
+  updatedAt: string;
+  createdAt: string;
+  url?: string | null;
+  thumbnailURL?: string | null;
+  filename?: string | null;
+  mimeType?: string | null;
+  filesize?: number | null;
+  width?: number | null;
+  height?: number | null;
+  focalX?: number | null;
+  focalY?: number | null;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "users".
  */
 export interface User {
-  id: string;
+  id: number;
   updatedAt: string;
   createdAt: string;
   email: string;
@@ -145,29 +264,10 @@ export interface User {
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
- * via the `definition` "media".
- */
-export interface Media {
-  id: string;
-  alt: string;
-  updatedAt: string;
-  createdAt: string;
-  url?: string | null;
-  thumbnailURL?: string | null;
-  filename?: string | null;
-  mimeType?: string | null;
-  filesize?: number | null;
-  width?: number | null;
-  height?: number | null;
-  focalX?: number | null;
-  focalY?: number | null;
-}
-/**
- * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "payload-kv".
  */
 export interface PayloadKv {
-  id: string;
+  id: number;
   key: string;
   data:
     | {
@@ -184,20 +284,28 @@ export interface PayloadKv {
  * via the `definition` "payload-locked-documents".
  */
 export interface PayloadLockedDocument {
-  id: string;
+  id: number;
   document?:
     | ({
+        relationTo: 'curios';
+        value: number | Curio;
+      } | null)
+    | ({
         relationTo: 'users';
-        value: string | User;
+        value: number | User;
       } | null)
     | ({
         relationTo: 'media';
-        value: string | Media;
+        value: number | Media;
+      } | null)
+    | ({
+        relationTo: 'tags';
+        value: number | Tag;
       } | null);
   globalSlug?: string | null;
   user: {
     relationTo: 'users';
-    value: string | User;
+    value: number | User;
   };
   updatedAt: string;
   createdAt: string;
@@ -207,10 +315,10 @@ export interface PayloadLockedDocument {
  * via the `definition` "payload-preferences".
  */
 export interface PayloadPreference {
-  id: string;
+  id: number;
   user: {
     relationTo: 'users';
-    value: string | User;
+    value: number | User;
   };
   key?: string | null;
   value?:
@@ -230,11 +338,39 @@ export interface PayloadPreference {
  * via the `definition` "payload-migrations".
  */
 export interface PayloadMigration {
-  id: string;
+  id: number;
   name?: string | null;
   batch?: number | null;
   updatedAt: string;
   createdAt: string;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "curios_select".
+ */
+export interface CuriosSelect<T extends boolean = true> {
+  title?: T;
+  titleHint?: T;
+  presence?: T;
+  tags?: T;
+  year?: T;
+  yearFrom?: T;
+  yearTo?: T;
+  monthFrom?: T;
+  monthTo?: T;
+  dateBasis?: T;
+  photos?: T;
+  description?: T;
+  notes?: T;
+  provenance?: T;
+  acquisitionNotes?: T;
+  disposition?: T;
+  onLoanTo?: T;
+  purchaseInterest?: T;
+  material?: T;
+  acquiredFrom?: T;
+  updatedAt?: T;
+  createdAt?: T;
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
@@ -276,6 +412,16 @@ export interface MediaSelect<T extends boolean = true> {
   height?: T;
   focalX?: T;
   focalY?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "tags_select".
+ */
+export interface TagsSelect<T extends boolean = true> {
+  name?: T;
+  slug?: T;
+  updatedAt?: T;
+  createdAt?: T;
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema

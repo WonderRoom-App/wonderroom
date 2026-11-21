@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(__filename)
 
 const nextConfig: NextConfig = {
-  transpilePackages: ['@wonderroom/core'],
+  transpilePackages: ['@wonderroom/core', '@wonderroom/plugin-curios'],
   images: {
     localPatterns: [
       {

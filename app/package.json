@@ -28,7 +28,8 @@
     "react-dom": "19.2.9",
     "sharp": "0.35.4",
     "@payloadcms/db-postgres": "3.94.1",
-    "@wonderroom/core": "*"
+    "@wonderroom/core": "*",
+    "@wonderroom/plugin-curios": "*"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
