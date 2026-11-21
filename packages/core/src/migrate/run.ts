@@ -1,12 +1,13 @@
 import type { PostgresAdapter } from '@payloadcms/db-postgres'
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import type { Payload } from 'payload'
 import { escapeIdentifier } from 'pg'
 import { rebuildItemsIndex } from '../items'
 import { StartError } from '../plugin'
+import { msFromEnv } from './lock'
 import { analyzeSchemaChange, planMigration, removalMigration, type SchemaChange, type Snapshot } from './analyze'
 import { deleteUnapplied, latestSnapshot, migrationNames, writeMigration } from './files'
 
@@ -24,10 +25,19 @@ const timestamp = () => {
  * Runs one CLI step as a child process, with no stdin and a time limit. Its output goes to ours.
  * Resolves once the child has exited, so a killed step can't write files after the caller cleans up.
  */
-function runStep(step: string, command: string, args: string[], afterTimeout = 'It may be waiting for an answer to a question. Nothing was applied.'): Promise<void> {
-  const limitMs = Number(process.env.WONDERROOM_STEP_TIMEOUT_MS ?? 300_000)
+function runStep(
+  step: string,
+  command: string,
+  args: string[],
+  options: { afterTimeout?: string; env?: Record<string, string> } = {},
+): Promise<void> {
+  const { afterTimeout = 'It may be waiting for an answer to a question. Nothing was applied.', env = {} } = options
+  const limitMs = msFromEnv('WONDERROOM_STEP_TIMEOUT_MS', 300_000)
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } })
+    // If this process exits first (a lost lock, a crash), the step must not run on without it.
+    const killChild = () => child.kill('SIGKILL')
+    process.on('exit', killChild)
     let output = ''
     const keep = (chunk: Buffer, to: NodeJS.WriteStream) => {
       to.write(chunk)
@@ -42,6 +52,7 @@ function runStep(step: string, command: string, args: string[], afterTimeout = '
     }, limitMs)
     child.on('error', (error: NodeJS.ErrnoException) => {
       clearTimeout(timer)
+      process.off('exit', killChild)
       reject(
         error.code === 'ENOENT'
           ? new StartError(`The engine can't find ${command}, which it needs for ${step}. Install it and start again.`)
@@ -50,6 +61,7 @@ function runStep(step: string, command: string, args: string[], afterTimeout = '
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      process.off('exit', killChild)
       if (timedOut) {
         reject(new StartError(`${step} did not finish in ${limitMs / 1000} s. ${afterTimeout}`))
       } else if (code !== 0) {
@@ -60,6 +72,21 @@ function runStep(step: string, command: string, args: string[], afterTimeout = '
       }
     })
   })
+}
+
+/** pg_dump's arguments and environment. The connection, password included, goes in the environment only. */
+export function pgDumpCommand(databaseUrl: string, file: string): { args: string[]; env: Record<string, string> } {
+  const url = new URL(databaseUrl)
+  const settings = {
+    PGHOST: url.hostname,
+    PGPORT: url.port,
+    PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password),
+    PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
+    PGSSLMODE: url.searchParams.get('sslmode') ?? '',
+  }
+  const env = Object.fromEntries(Object.entries(settings).filter(([, value]) => value !== ''))
+  return { args: ['--format=custom', `--file=${file}`, '--no-password'], env }
 }
 
 async function appliedMigrations(query: Query): Promise<{ name: string; batch: string }[]> {
@@ -132,10 +159,18 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
     )
   }
   const appliedNames = new Set(applied.map(({ name }) => name))
+  const folderFiles = new Set(readdirSync(dir))
+  // The folder and the database must share a history before the engine deletes anything.
+  const missing = [...appliedNames].sort().find((name) => !folderFiles.has(`${name}.ts`) || !folderFiles.has(`${name}.json`))
+  if (missing !== undefined) {
+    throw new StartError(
+      `The database applied ${missing}, but ${dir} has no file for it. Restore the folder from the backup taken with the database, or check DATABASE_URL.`,
+    )
+  }
   const folderNames = migrationNames(dir)
   if (!applied.length && folderNames.length) {
     throw new StartError(
-      `The database has no migration history, but ${dir} holds ${folderNames.length} migrations. Check DATABASE_URL. To start over on purpose, empty ${dir} first.`,
+      `The database has no migration history, but ${dir} holds ${folderNames.length} migrations. Check DATABASE_URL. To start over on purpose, empty ${dir} first. If the first start was interrupted, empty ${dir} and start again.`,
     )
   }
   const latestApplied = [...appliedNames].sort().at(-1) ?? ''
@@ -149,11 +184,6 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
   for (const file of deleteUnapplied(dir, appliedNames)) console.log(`Deleted ${file}, which the database never applied.`)
 
   const latest = latestSnapshot(dir)
-  if (latest === null && applied.length) {
-    throw new StartError(
-      `The migrations folder ${dir} is missing or empty, but the database has applied migrations. Restore the folder from the backup taken with the database.`,
-    )
-  }
 
   const { generateDrizzleJson, generateMigration, upSnapshot } = db.requireDrizzleKit()
   const after = (await generateDrizzleJson(db.schema)) as unknown as Snapshot
@@ -167,12 +197,17 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
   const backups = join(options.dataDir, 'backups')
   try {
     let reduced = before
-    if (plan.kind === 'apply' && plan.removals.length) {
+    // A plan that applies passed every confirm check, so a retype or a removed enum value here is confirmed.
+    const confirmedChange =
+      plan.kind === 'apply' && (plan.removals.length > 0 || change.retypedColumns.length > 0 || change.changedEnums.some(({ removedValues }) => removedValues.length))
+    if (confirmedChange) {
       mkdirSync(backups, { recursive: true })
       const dump = join(backups, `before-${timestamp()}.dump`)
-      await runStep('pg_dump', 'pg_dump', ['--format=custom', `--file=${dump}`, `--dbname=${db.poolOptions.connectionString}`])
+      const { args, env } = pgDumpCommand(db.poolOptions.connectionString!, dump)
+      await runStep('the database backup', 'pg_dump', args, { env })
       console.log(`Backed up the database to ${dump}.`)
-
+    }
+    if (plan.kind === 'apply' && plan.removals.length) {
       const phaseOne = await removalMigration(before, plan.removals, generateMigration)
       const down = await generateMigration(phaseOne.snapshot as any, before as any)
       writeMigration(dir, `${timestamp()}_wonderroom_removals`, { packageName: db.packageName, up: phaseOne.statements, down, snapshot: phaseOne.snapshot })
@@ -198,7 +233,7 @@ export async function runMigrations(payload: Payload, options: { dataDir: string
       }
     }
 
-    if (migrationNames(dir).some((name) => !appliedNames.has(name))) await runStep('payload migrate', 'payload', ['migrate'], `Payload runs each migration in a transaction, so an unfinished one is rolled back. A backup from this start is in ${backups}, if one was taken.`)
+    if (migrationNames(dir).some((name) => !appliedNames.has(name))) await runStep('payload migrate', 'payload', ['migrate'], { afterTimeout: `Payload runs each migration in a transaction, so an unfinished one is rolled back. A backup from this start is in ${backups}, if one was taken.` })
   } catch (error) {
     // The database is the record of what happened. Files it did not apply must not survive to the next start.
     const nowApplied = new Set((await appliedMigrations(query)).map(({ name }) => name))

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { describe, expect, test } from 'vitest'
@@ -214,8 +214,67 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       await withTestDatabase(async (emptyUrl) => {
         const stopped = await install.start({ DATABASE_URL: emptyUrl })
         expectExit(stopped, 1)
-        expect(stopped.output).toContain(`The database has no migration history, but ${install.migrationsDir} holds 1 migrations. Check DATABASE_URL.`)
+        expect(stopped.output).toContain(`The database has no migration history, but ${install.migrationsDir} holds 1 migrations. Check DATABASE_URL. To start over on purpose, empty ${install.migrationsDir} first. If the first start was interrupted, empty ${install.migrationsDir} and start again.`)
       })
+      expect(install.files()).toEqual(files)
+    }))
+
+  test('a database with another history stops the start and keeps the files', () =>
+    withInstall(async (install) => {
+      install.plugins([curios])
+      expectExit(await install.start(), 0)
+      const files = install.files()
+      await withTestDatabase(async (otherUrl) => {
+        // Install B: its own folder and database, a later migration name and a different schema.
+        await withInstall(async (other) => {
+          other.plugins([curios, coins])
+          expectExit(await other.start({ DATABASE_URL: otherUrl }), 0)
+        })
+        const stopped = await install.start({ DATABASE_URL: otherUrl })
+        expectExit(stopped, 1)
+        expect(stopped.output).toMatch(/The database applied \S+, but \S+ has no file for it\. Restore the folder from the backup taken with the database, or check DATABASE_URL\./)
+      })
+      expect(install.files()).toEqual(files)
+    }))
+
+  test('a folder without the latest applied migration stops the start', () =>
+    withInstall(async (install) => {
+      install.plugins([curios])
+      expectExit(await install.start(), 0)
+      install.plugins([curios, coins])
+      expectExit(await install.start(), 0)
+      const latest = install.files().filter((file) => file.endsWith('.json')).at(-1)!.slice(0, -'.json'.length)
+      for (const ext of ['ts', 'json']) rmSync(join(install.migrationsDir, `${latest}.${ext}`))
+      const stopped = await install.start()
+      expectExit(stopped, 1)
+      expect(stopped.output).toContain(`The database applied ${latest}, but ${install.migrationsDir} has no file for it.`)
+    }))
+
+  test('a confirmed retype backs up the database first', () =>
+    withInstall(async (install) => {
+      install.plugins([toy('coins', [{ name: 'weight', type: 'number' }])])
+      expectExit(await install.start(), 0)
+      install.plugins([toy('coins', [text('weight')])])
+      const stopped = await install.start()
+      expectExit(stopped, 1)
+      install.plugins([toy('coins', [text('weight')])], [confirmLine(stopped.output, 'retype coins.weight')])
+      expectExit(await install.start(), 0)
+      expect(readdirSync(join(install.dataDir, 'backups')).some((file) => file.endsWith('.dump'))).toBe(true)
+    }))
+
+  test('a missing pg_dump stops the start before anything is dropped', () =>
+    withInstall(async (install) => {
+      install.plugins([curios, coins])
+      expectExit(await install.start(), 0)
+      install.plugins([curios])
+      const line = confirmLine((await install.start()).output, 'drop table coins')
+      install.plugins([curios], [line])
+      const files = install.files()
+      const path = process.env.PATH!.split(delimiter).filter((dir) => !existsSync(join(dir, 'pg_dump'))).join(delimiter)
+      const stopped = await install.start({ PATH: path })
+      expectExit(stopped, 1)
+      expect(stopped.output).toContain("can't find pg_dump")
+      expect(await install.tableExists('coins')).toBe(true)
       expect(install.files()).toEqual(files)
     }))
 
@@ -236,7 +295,7 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       for (const file of install.files()) rmSync(join(install.migrationsDir, file))
       const stopped = await install.start()
       expectExit(stopped, 1)
-      expect(stopped.output).toContain('is missing or empty')
+      expect(stopped.output).toMatch(/The database applied \S+, but \S+ has no file for it\./)
     }))
 
   test('a step that runs too long stops the start', () =>

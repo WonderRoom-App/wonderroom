@@ -10,6 +10,17 @@ const POLL_INTERVAL_MS = 2_000
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/** A time limit from the environment, in milliseconds. Unset gives `fallback`. */
+export function msFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
+  const ms = Number(raw)
+  if (raw.trim() === '' || !Number.isFinite(ms) || ms <= 0) {
+    throw new StartError(`${name} must be a positive number of milliseconds, but it is "${raw}". Fix or unset it.`)
+  }
+  return ms
+}
+
 /**
  * Runs `fn` while this process holds the migration lock. Waits a bounded time for it, so a start that
  * hangs while it holds the lock makes the next start fail loudly instead of wait forever.
@@ -18,8 +29,16 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
  * client frees the lock, and Postgres also frees it when the process dies and the connection drops.
  */
 export async function withMigrationLock<T>(databaseUrl: string, fn: () => Promise<T>): Promise<T> {
-  const waitMs = Number(process.env.WONDERROOM_LOCK_TIMEOUT_MS ?? 300_000)
+  const waitMs = msFromEnv('WONDERROOM_LOCK_TIMEOUT_MS', 300_000)
   const client = new pg.Client({ connectionString: databaseUrl })
+  // Losing this connection loses the lock. The start fails instead of going on unprotected.
+  // A child step still running is killed when the process exits (see runStep).
+  const lockLost = new Promise<never>((_, reject) =>
+    client.on('error', (error) =>
+      reject(new StartError(`The connection that holds the migration lock dropped: ${error.message}. Start again.`)),
+    ),
+  )
+  lockLost.catch(() => {})
   await client.connect()
   try {
     // pg_try_advisory_lock returns at once instead of queueing, which makes the bounded wait possible.
@@ -38,8 +57,8 @@ export async function withMigrationLock<T>(databaseUrl: string, fn: () => Promis
       await sleep(POLL_INTERVAL_MS)
     }
     if (waited) console.log('Took the migration lock.')
-    return await fn()
+    return await Promise.race([fn(), lockLost])
   } finally {
-    await client.end()
+    await client.end().catch(() => {})
   }
 }
