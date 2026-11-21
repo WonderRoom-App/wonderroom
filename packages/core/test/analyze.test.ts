@@ -1,0 +1,187 @@
+import { describe, expect, test } from 'vitest'
+import { analyzeSchemaChange, planMigration, removeFromSnapshot, type SchemaChange, type Snapshot } from '../src/migrate/analyze'
+
+type Column = { type?: string; notNull?: boolean; default?: string }
+const table = (columns: Record<string, Column>) => ({
+  columns: Object.fromEntries(Object.entries(columns).map(([name, c]) => [name, { name, type: 'varchar', notNull: false, ...c }])),
+  indexes: {},
+})
+const snapshot = (tables: Record<string, Record<string, Column>>, enums: string[] = []): Snapshot => ({
+  version: '7',
+  tables: Object.fromEntries(Object.entries(tables).map(([name, columns]) => [`public.${name}`, { name, ...table(columns) }])),
+  enums: Object.fromEntries(enums.map((name) => [`public.${name}`, { name, values: ['a'] }])),
+})
+const emptyChange = (over: Partial<SchemaChange> = {}): SchemaChange => ({
+  addedTables: [], removedTables: [], addedColumns: [], removedColumns: [],
+  addedEnums: [], removedEnums: [], retypedColumns: [], newlyNotNull: [], ...over,
+})
+const LATEST = '20261118_164300_wonderroom'
+const plan = (change: SchemaChange, confirm: string[] = [], tablesWithRows: string[] = [], latestMigration: string | null = LATEST) =>
+  planMigration(change, { confirm, latestMigration, tablesWithRows: new Set(tablesWithRows) })
+const stopMessage = (result: ReturnType<typeof plan>) => {
+  if (result.kind !== 'stop') throw new Error(`expected stop, got ${result.kind}`)
+  return result.message
+}
+
+describe('analyzeSchemaChange', () => {
+  const base = snapshot({ a: { x: {}, y: {} } }, ['enum_a_s'])
+  test('tables', () => {
+    const c = analyzeSchemaChange(base, snapshot({ b: { x: {} } }, ['enum_a_s']))
+    expect(c.addedTables).toEqual(['b'])
+    expect(c.removedTables).toEqual(['a'])
+  })
+  test('columns', () => {
+    const c = analyzeSchemaChange(base, snapshot({ a: { x: {}, z: { notNull: true, default: "'q'" }, w: { notNull: true } } }, ['enum_a_s']))
+    expect(c.removedColumns).toEqual([{ table: 'a', column: 'y' }])
+    expect(c.addedColumns).toEqual([
+      { table: 'a', column: 'z', notNull: true, hasDefault: true },
+      { table: 'a', column: 'w', notNull: true, hasDefault: false },
+    ])
+  })
+  test('enums', () => {
+    const c = analyzeSchemaChange(base, snapshot({ a: { x: {}, y: {} } }, ['enum_a_t']))
+    expect(c.addedEnums).toEqual(['enum_a_t'])
+    expect(c.removedEnums).toEqual(['enum_a_s'])
+  })
+  test('retyped', () => {
+    const c = analyzeSchemaChange(base, snapshot({ a: { x: { type: 'integer' }, y: {} } }, ['enum_a_s']))
+    expect(c.retypedColumns).toEqual([{ table: 'a', column: 'x', from: 'varchar', to: 'integer' }])
+  })
+  test('newly not null', () => {
+    const c = analyzeSchemaChange(base, snapshot({ a: { x: { notNull: true }, y: {} } }, ['enum_a_s']))
+    expect(c.newlyNotNull).toEqual([{ table: 'a', column: 'x' }])
+  })
+  test('no change', () => {
+    expect(analyzeSchemaChange(base, structuredClone(base))).toEqual(emptyChange())
+  })
+})
+
+describe('planMigration', () => {
+  const dropCoins = emptyChange({ removedTables: ['coins'] })
+  const dropKey = `drop table coins @ ${LATEST}`
+
+  test('none', () => expect(plan(emptyChange())).toEqual({ kind: 'none' }))
+  test('only additions', () => {
+    expect(plan(emptyChange({ addedTables: ['coins'], addedEnums: ['enum_coins_s'] }))).toEqual({ kind: 'apply', removals: [] })
+  })
+  test('unconfirmed table removal stops with the exact line', () => {
+    expect(stopMessage(plan(dropCoins))).toContain(dropKey)
+  })
+  test('confirmed table removal applies', () => {
+    expect(plan(dropCoins, [dropKey])).toEqual({ kind: 'apply', removals: [{ key: dropKey, table: 'coins' }] })
+  })
+  test('confirmation for an older migration does not match', () => {
+    expect(plan(dropCoins, ['drop table coins @ 20250101_000000_old']).kind).toBe('stop')
+  })
+  test('removal on a fresh install stops', () => {
+    expect(stopMessage(plan(dropCoins, [], [], null))).toContain('No migration exists yet')
+  })
+  test('removed and added table, unconfirmed', () => {
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins'], addedTables: ['stamps'] })))
+    expect(message).toContain('coins')
+    expect(message).toContain('stamps')
+    expect(message).toContain("can't tell a rename from a swap")
+    expect(message).toContain("A plugin's slug can't change once created. Change its label or URL path instead.")
+  })
+  test('removed and added table, confirmed (swap)', () => {
+    expect(plan(emptyChange({ removedTables: ['coins'], addedTables: ['stamps'] }), [dropKey]).kind).toBe('apply')
+  })
+  test('child tables, enums and payload columns ride on the table drop', () => {
+    const change = emptyChange({
+      removedTables: ['coins', 'coins_rels', 'coins_photos'],
+      removedEnums: ['enum_coins_status'],
+      removedColumns: [
+        { table: 'payload_locked_documents_rels', column: 'coins_id' },
+        { table: 'payload_preferences_rels', column: 'coins_id' },
+      ],
+    })
+    const result = plan(change, [dropKey])
+    expect(result).toEqual({
+      kind: 'apply',
+      removals: [
+        { key: dropKey, table: 'coins' },
+        { key: dropKey, table: 'coins_rels' },
+        { key: dropKey, table: 'coins_photos' },
+        { key: dropKey, table: 'coins', enum: 'enum_coins_status' },
+        { key: dropKey, table: 'payload_locked_documents_rels', column: 'coins_id' },
+        { key: dropKey, table: 'payload_preferences_rels', column: 'coins_id' },
+      ],
+    })
+  })
+  test('only the first line is needed for a table with children', () => {
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'coins_rels'] })))
+    expect(message).toContain(dropKey)
+    expect(message).not.toContain('coins_rels @')
+  })
+  test('a confirmed drop does not cover a table that still exists', () => {
+    // coins_extra exists in both snapshots, so it is not in removedTables and has no removal.
+    const result = plan(emptyChange({ removedTables: ['coins', 'coins_rels'] }), [dropKey])
+    expect(result).toMatchObject({ kind: 'apply' })
+    expect(result.kind === 'apply' && result.removals.map((r) => r.table)).toEqual(['coins', 'coins_rels'])
+  })
+  test('a payload column for a table that is not removed still needs a key', () => {
+    const message = stopMessage(plan(emptyChange({ removedColumns: [{ table: 'payload_locked_documents_rels', column: 'coins_id' }] })))
+    expect(message).toContain(`drop column payload_locked_documents_rels.coins_id @ ${LATEST}`)
+  })
+  test('removed and added enum, not covered', () => {
+    const message = stopMessage(plan(emptyChange({ removedEnums: ['enum_a_old'], addedEnums: ['enum_a_new'] })))
+    expect(message).toContain('enum_a_old')
+    expect(message).toContain('enum_a_new')
+  })
+  test('removed and added column in one table', () => {
+    const message = stopMessage(plan(emptyChange({
+      removedColumns: [{ table: 'coins', column: 'old_name' }],
+      addedColumns: [{ table: 'coins', column: 'new_name', notNull: false, hasDefault: false }],
+    })))
+    expect(message).toContain('coins.old_name')
+    expect(message).toContain('new_name')
+    expect(message).toContain('M1 has no declared renames')
+    expect(message).toContain(`drop column coins.old_name @ ${LATEST}`)
+  })
+  test('confirmed column drop applies, and covers its enum', () => {
+    const key = `drop column coins.status @ ${LATEST}`
+    const result = plan(emptyChange({ removedColumns: [{ table: 'coins', column: 'status' }], removedEnums: ['enum_coins_status'] }), [key])
+    expect(result).toEqual({ kind: 'apply', removals: [
+      { key, table: 'coins', enum: 'enum_coins_status' },
+      { key, table: 'coins', column: 'status' },
+    ] })
+  })
+  test('retyped column stops unless confirmed', () => {
+    const change = emptyChange({ retypedColumns: [{ table: 'coins', column: 'year', from: 'varchar', to: 'integer' }] })
+    expect(stopMessage(plan(change))).toContain(`retype coins.year @ ${LATEST}`)
+    expect(plan(change, [`retype coins.year @ ${LATEST}`]).kind).toBe('apply')
+  })
+  test('new NOT NULL column without default on a table with rows', () => {
+    const change = emptyChange({ addedColumns: [{ table: 'coins', column: 'grade', notNull: true, hasDefault: false }] })
+    const message = stopMessage(plan(change, [], ['coins']))
+    expect(message).toContain('coins.grade')
+    expect(message).toContain('default')
+    expect(plan(change, [], []).kind).toBe('apply')
+    expect(plan(emptyChange({ addedColumns: [{ table: 'coins', column: 'grade', notNull: true, hasDefault: true }] }), [], ['coins']).kind).toBe('apply')
+  })
+  test('column that becomes NOT NULL on a table with rows', () => {
+    const message = stopMessage(plan(emptyChange({ newlyNotNull: [{ table: 'coins', column: 'year' }] }), [], ['coins']))
+    expect(message).toContain('coins.year')
+  })
+  test('lists every problem in one message', () => {
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'stamps'] })))
+    expect(message).toContain('drop table coins')
+    expect(message).toContain('drop table stamps')
+  })
+})
+
+describe('removeFromSnapshot', () => {
+  test('removes listed tables, enums and columns only', () => {
+    const before = snapshot({ coins: { a: {} }, coins_rels: { a: {} }, coins_extra: { a: {} }, other: { a: {}, b: {} } }, ['enum_coins_s', 'enum_other_s'])
+    const after = removeFromSnapshot(before, [
+      { key: 'k', table: 'coins' },
+      { key: 'k', table: 'coins_rels' },
+      { key: 'k', table: 'coins', enum: 'enum_coins_s' },
+      { key: 'k', table: 'other', column: 'b' },
+    ])
+    expect(Object.keys(after.tables)).toEqual(['public.coins_extra', 'public.other'])
+    expect(Object.keys(after.enums)).toEqual(['public.enum_other_s'])
+    expect(Object.keys(after.tables['public.other'].columns)).toEqual(['a'])
+    expect(Object.keys(before.tables)).toHaveLength(4)
+  })
+})
