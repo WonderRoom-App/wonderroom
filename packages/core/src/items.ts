@@ -26,6 +26,14 @@ type IndexRow = { id: number | string; itemType: string; itemId: number; title?:
 export const itemsCollection: CollectionConfig = {
   slug: 'items',
   admin: { useAsTitle: 'title' },
+  // Only the engine's hooks and rebuild write here, through the Local API's overrideAccess.
+  access: {
+    read: ({ req }) => Boolean(req.user),
+    create: () => false,
+    update: () => false,
+    delete: () => false,
+  },
+  indexes: [{ fields: ['itemType', 'itemId'], unique: true }],
   fields: [
     { name: 'itemType', type: 'text', required: true, index: true },
     { name: 'itemId', type: 'number', required: true, index: true },
@@ -50,8 +58,33 @@ export function itemReference(options: {
   }
 }
 
-// ponytail: top-level fields only (rows and collapsibles count as top level).
-// A reference inside a group, array or block is not found; add a walk when a plugin needs one.
+const isItemReference = (field: Field) => Boolean(field.custom?.wonderroom?.onItemDelete)
+
+/**
+ * Finds an item reference below the top level of `fields`. Rows, collapsibles, unnamed
+ * groups and unnamed tabs keep their fields at the top level; named groups, named tabs,
+ * arrays and blocks do not. Returns the field name and the path of its container.
+ */
+export function findNestedItemReference(fields: Field[], path: string[] = []): { field: string; path: string[] } | undefined {
+  for (const field of fields) {
+    if (path.length > 0 && 'name' in field && isItemReference(field)) return { field: field.name, path }
+    for (const [childFields, childPath] of childFieldLists(field, path)) {
+      const found = findNestedItemReference(childFields, childPath)
+      if (found) return found
+    }
+  }
+  return undefined
+}
+
+function childFieldLists(field: Field, path: string[]): [Field[], string[]][] {
+  const named = 'name' in field && field.name ? [...path, field.name] : path
+  if (field.type === 'tabs') return field.tabs.map((tab) => [tab.fields, 'name' in tab && tab.name ? [...path, tab.name] : path])
+  if (field.type === 'blocks') return field.blocks.map((block) => [block.fields, [...named, block.slug]])
+  if ('fields' in field) return [[field.fields, named]]
+  return []
+}
+
+// buildEngineConfig rejects nested references first, so the top level holds them all.
 export function findItemReferences(collections: SanitizedCollectionConfig[]): ItemReferenceUse[] {
   return collections.flatMap((collection) =>
     collection.flattenedFields.flatMap((field) => {
@@ -154,13 +187,8 @@ export const removeIndexRow: CollectionAfterDeleteHook = async ({ collection, id
 export async function rebuildItemsIndex(payload: Payload): Promise<{ created: number; removed: number; retitled: number }> {
   const counts = { created: 0, removed: 0, retitled: 0 }
   const rows = (await payload.find({ collection: itemsCollection.slug, pagination: false, depth: 0 })).docs as IndexRow[]
-  const rowsByItem = new Map<string, IndexRow>()
-  const orphans: IndexRow[] = []
-  for (const row of rows) {
-    const key = `${row.itemType}:${row.itemId}`
-    if (rowsByItem.has(key)) orphans.push(row)
-    else rowsByItem.set(key, row)
-  }
+  // The unique index keeps this to one row per item.
+  const rowsByItem = new Map(rows.map((row) => [`${row.itemType}:${row.itemId}`, row]))
 
   for (const slug of itemTypeSlugs(payload.config)) {
     const itemType = payload.collections[slug].config
@@ -180,8 +208,7 @@ export async function rebuildItemsIndex(payload: Payload): Promise<{ created: nu
     }
   }
 
-  orphans.push(...rowsByItem.values())
-  for (const row of orphans) {
+  for (const row of rowsByItem.values()) {
     const uses = itemReferences(payload.config)
     const referenced = (await Promise.all(uses.map((use) => countReferences(payload, use, row.id)))).some(Boolean)
     if (referenced) {

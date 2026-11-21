@@ -6,6 +6,7 @@ import curios from '../../plugin-curios/src'
 import { buildEngineConfig, itemTypeSlugs } from '../src/config'
 import { coreItemFields } from '../src/coreFields'
 import type { Catalog } from '../src/install'
+import { findNestedItemReference, itemReference } from '../src/items'
 import { StartError, definePlugin } from '../src/plugin'
 
 // Payload appends createdAt and updatedAt to every collection.
@@ -29,6 +30,24 @@ const catalog: Catalog = {
   beta: itemType('beta', ['material']),
   clash: itemType('clash', ['title']),
   extras: () => definePlugin({ name: 'extras', kind: 'add-on', collections: [{ slug: 'extras-things', fields: [] }] }),
+  nested: () =>
+    definePlugin({
+      name: 'nested',
+      kind: 'add-on',
+      collections: [
+        {
+          slug: 'nested-things',
+          fields: [
+            {
+              type: 'row',
+              fields: [
+                { name: 'details', type: 'group', fields: [itemReference({ name: 'item', onItemDelete: 'refuse' })] },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
 }
 
 function build(pluginsYml: string, siteFiles: Record<string, string> = {}) {
@@ -79,5 +98,25 @@ describe('buildEngineConfig', () => {
   it('lists the item type slugs', async () => {
     const config = await build('plugins:\n  - use: curios\n')
     expect(itemTypeSlugs(config)).toEqual(['curios'])
+  })
+})
+
+describe('item references', () => {
+  it('rejects an item reference that is not a top-level field', async () => {
+    const attempt = build('plugins:\n  - use: nested\n')
+    await expect(attempt).rejects.toThrow(StartError)
+    await expect(attempt).rejects.toThrow(
+      'nested puts the item reference "item" inside nested-things.details. Item references must be top-level fields in this version. Move the field to the top level.',
+    )
+  })
+  it('finds references in named tabs, arrays and blocks, but not in rows or unnamed tabs', () => {
+    const ref = itemReference({ name: 'item', onItemDelete: 'refuse' })
+    expect(findNestedItemReference([{ type: 'row', fields: [ref] }])).toBeUndefined()
+    expect(findNestedItemReference([{ type: 'tabs', tabs: [{ label: 'One', fields: [ref] }] }])).toBeUndefined()
+    expect(findNestedItemReference([{ type: 'tabs', tabs: [{ name: 'one', fields: [ref] }] }])).toEqual({ field: 'item', path: ['one'] })
+    expect(findNestedItemReference([{ name: 'rows', type: 'array', fields: [ref] }])).toEqual({ field: 'item', path: ['rows'] })
+    expect(
+      findNestedItemReference([{ name: 'parts', type: 'blocks', blocks: [{ slug: 'part', fields: [ref] }] }]),
+    ).toEqual({ field: 'item', path: ['parts', 'part'] })
   })
 })

@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/pg": "8.20.0",
+    "pg": "8.20.0",
     "typescript": "^5.7.3",
     "vitest": "4.0.18"
   },
@@ -17,9 +19,9 @@
     "payload": "3.94.1"
   },
   "dependencies": {
-    "yaml": "^2.9.1",
     "@payloadcms/db-postgres": "3.94.1",
     "@payloadcms/richtext-lexical": "3.94.1",
-    "sharp": "0.35.4"
+    "sharp": "0.35.4",
+    "yaml": "^2.9.1"
   }
 }

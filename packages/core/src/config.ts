@@ -8,7 +8,7 @@ import { Tags } from './collections/Tags'
 import { Users } from './collections/Users'
 import { coreItemFields, setYearRangeFromYear } from './coreFields'
 import { loadInstall, type Catalog } from './install'
-import { applyDeleteRules, findItemReferences, itemsCollection, removeIndexRow, syncIndexRow } from './items'
+import { applyDeleteRules, findItemReferences, findNestedItemReference, itemsCollection, removeIndexRow, syncIndexRow } from './items'
 import { StartError, type ItemTypeDefinition, type WonderRoomPlugin } from './plugin'
 
 export type EngineOptions = {
@@ -46,8 +46,24 @@ function buildItemTypeCollection(plugin: WonderRoomPlugin, itemType: ItemTypeDef
   }
 }
 
+/** Delete rules see top-level references only, so a nested one stops the start. */
+function rejectNestedItemReferences(plugin: WonderRoomPlugin): void {
+  const collections = [
+    ...(plugin.itemType ? [{ slug: plugin.itemType.slug, fields: plugin.itemType.fields }] : []),
+    ...(plugin.collections ?? []),
+  ]
+  for (const collection of collections) {
+    const nested = findNestedItemReference(collection.fields)
+    if (!nested) continue
+    throw new StartError(
+      `${plugin.name} puts the item reference "${nested.field}" inside ${[collection.slug, ...nested.path].join('.')}. Item references must be top-level fields in this version. Move the field to the top level.`,
+    )
+  }
+}
+
 export async function buildEngineConfig(options: EngineOptions): Promise<SanitizedConfig> {
   const install = loadInstall(options.configDir, options.catalog)
+  install.plugins.forEach(rejectNestedItemReferences)
   const itemTypes = install.plugins.flatMap((plugin) =>
     plugin.itemType ? [buildItemTypeCollection(plugin, plugin.itemType)] : [],
   )

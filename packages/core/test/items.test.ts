@@ -2,7 +2,7 @@ import type { PostgresAdapter } from '@payloadcms/db-postgres'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { APIError, getPayload, type Payload } from 'payload'
+import { APIError, Forbidden, getPayload, type Payload } from 'payload'
 import { describe, expect, it } from 'vitest'
 import { buildEngineConfig } from '../src/config'
 import { rebuildItemsIndex } from '../src/items'
@@ -62,6 +62,37 @@ describe('the items index', { timeout: 60_000 }, () => {
 
       await payload.delete({ collection: 'curios', id: curio.id })
       expect(await indexRows(payload)).toEqual([])
+    }))
+
+  it('keeps one index row per item', () =>
+    withPayload(async (payload) => {
+      const curio = await payload.create({ collection: 'curios', data: { title: 'Brass key' } })
+      await expect(
+        payload.create({ collection: 'items', data: { itemType: 'curios', itemId: curio.id, title: 'Copy' } }),
+      ).rejects.toThrow()
+      expect(await count(payload, 'items')).toBe(1)
+    }))
+
+  it('lets a user read the index but not write it', () =>
+    withPayload(async (payload) => {
+      const user = await payload.create({ collection: 'users', data: { email: 'owner@example.com', password: 'secret-pass' } })
+      const asUser = { overrideAccess: false, user }
+
+      // The hooks still keep the index when the user's own writes check access.
+      const curio = await payload.create({ collection: 'curios', data: { title: 'Brass key' }, ...asUser })
+      const row = await indexRowFor(payload, curio.id)
+      expect((await payload.find({ collection: 'items', ...asUser })).docs).toHaveLength(1)
+
+      await expect(
+        payload.create({ collection: 'items', data: { itemType: 'curios', itemId: 9999, title: 'Fake' }, ...asUser }),
+      ).rejects.toThrow(Forbidden)
+      await expect(payload.update({ collection: 'items', id: row.id, data: { title: 'Fake' }, ...asUser })).rejects.toThrow(
+        Forbidden,
+      )
+      await expect(payload.delete({ collection: 'items', id: row.id, ...asUser })).rejects.toThrow(Forbidden)
+
+      await payload.delete({ collection: 'curios', id: curio.id, ...asUser })
+      expect(await count(payload, 'items')).toBe(0)
     }))
 
   it('links a featured entry to a curio through its index row, and to nothing else', () =>
