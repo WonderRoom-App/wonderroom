@@ -1,90 +1,10 @@
-import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { describe, expect, test } from 'vitest'
-import { stringify } from 'yaml'
+import { coins, curios, expectExit, toy, text, withInstall } from './helpers/install'
 import { withTestDatabase } from './helpers/db'
 
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url))
-const fixtureConfig = fileURLToPath(new URL('./fixtures/payload.config.ts', import.meta.url))
-// Not the system temp folder: migration files import @payloadcms/db-postgres, so the data
-// folder must sit where Node can find node_modules.
-const tmpRoot = fileURLToPath(new URL('../.tmp/', import.meta.url))
-
-type Entry = Record<string, unknown>
-const curios: Entry = { use: 'curios' }
-const toy = (slug: string, extraFields?: Entry[]): Entry => ({ use: 'toy-item', slug, ...(extraFields && { extraFields }) })
-const coins = toy('coins')
-const text = (name: string, more: Entry = {}): Entry => ({ name, type: 'text', ...more })
-
-type Start = { code: number | null; output: string }
-
-/** One install: a config folder, a data folder and a test database, started with `npm run migrate -w app`. */
-function withInstall(fn: (install: ReturnType<typeof makeInstall>) => Promise<void>) {
-  return withTestDatabase(async (databaseUrl) => {
-    mkdirSync(tmpRoot, { recursive: true })
-    const root = mkdtempSync(join(tmpRoot, 'migrate-'))
-    try {
-      await fn(makeInstall(root, databaseUrl))
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-}
-
-function makeInstall(root: string, databaseUrl: string) {
-  const configDir = join(root, 'config')
-  const dataDir = join(root, 'data')
-  const migrationsDir = join(dataDir, 'migrations')
-  mkdirSync(configDir)
-  mkdirSync(dataDir)
-  return {
-    databaseUrl,
-    migrationsDir,
-    dataDir,
-    plugins(entries: Entry[], confirm: string[] = []) {
-      writeFileSync(join(configDir, 'plugins.yml'), stringify({ plugins: entries, confirm }))
-    },
-    start(env: Record<string, string> = {}): Promise<Start> {
-      return new Promise((resolve, reject) => {
-        const child = spawn('npm', ['run', 'migrate', '-w', 'app'], {
-          cwd: repoRoot,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: {
-            ...process.env,
-            PAYLOAD_CONFIG_PATH: fixtureConfig,
-            WONDERROOM_CONFIG_DIR: configDir,
-            WONDERROOM_DATA_DIR: dataDir,
-            DATABASE_URL: databaseUrl,
-            ...env,
-          },
-        })
-        let output = ''
-        child.stdout.on('data', (chunk) => (output += chunk))
-        child.stderr.on('data', (chunk) => (output += chunk))
-        child.on('error', reject)
-        child.on('close', (code) => resolve({ code, output }))
-      })
-    },
-    async sql(text: string): Promise<any[]> {
-      const client = new pg.Client({ connectionString: databaseUrl })
-      await client.connect()
-      try {
-        return (await client.query(text)).rows
-      } finally {
-        await client.end()
-      }
-    },
-    async tableExists(table: string): Promise<boolean> {
-      return (await this.sql(`select to_regclass('public.${table}') is not null as found`))[0].found
-    },
-    files: () => readdirSync(migrationsDir).sort(),
-  }
-}
-
-const expectExit = (start: Start, code: number) => expect(start.code, start.output).toBe(code)
 const confirmLine = (output: string, action: string) => {
   const line = output.match(new RegExp(`${action} @ \\S+`))?.[0]
   if (!line) throw new Error(`no "${action}" line in:\n${output}`)

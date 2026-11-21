@@ -41,10 +41,15 @@ export const toyLedger = definePlugin({
   ],
 })
 
+/** An add-on that requires other plugins; plugins.yml sets `name` and `requires`. */
+const toyNeeds = (settings: { name: string; requires: string[] }) =>
+  definePlugin({ name: settings.name, kind: 'add-on', requires: settings.requires })
+
 export const catalog: Catalog = {
   curios,
   // plugins.yml: `use: toy-item` with `slug:` and optional `extraFields:`.
   'toy-item': (settings) => toyItem(settings as Parameters<typeof toyItem>[0]),
+  'toy-needs': (settings) => toyNeeds(settings as Parameters<typeof toyNeeds>[0]),
   featured: () => toyFeatured,
   ledger: () => toyLedger,
 }

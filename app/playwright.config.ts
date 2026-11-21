@@ -5,6 +5,17 @@ import { defineConfig, devices } from '@playwright/test'
  * https://github.com/motdotla/dotenv
  */
 import 'dotenv/config'
+import { randomBytes } from 'node:crypto'
+import { resolve } from 'node:path'
+
+// A fresh database and data folder for each run. Workers load this file again, so they keep the main process's values.
+if (!process.env.WONDERROOM_E2E_DATABASE) {
+  const runName = `wonderroom_e2e_${randomBytes(6).toString('hex')}`
+  process.env.WONDERROOM_E2E_DATABASE = runName
+  process.env.DATABASE_URL = `postgres://postgres:postgres@localhost:5433/${runName}`
+  process.env.PAYLOAD_SECRET = 'e2e-secret'
+  process.env.WONDERROOM_DATA_DIR = resolve('../.tmp', runName)
+}
 
 /**
  * See https://playwright.dev/docs/test-configuration.
@@ -34,8 +45,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'pnpm dev',
-    reuseExistingServer: true,
+    command: 'node tests/e2e/server.mjs',
+    reuseExistingServer: false,
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
+    timeout: 180_000,
     url: 'http://localhost:3000',
   },
 })
