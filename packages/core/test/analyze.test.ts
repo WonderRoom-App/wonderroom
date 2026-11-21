@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { describe, expect, test } from 'vitest'
-import { analyzeSchemaChange, planMigration, removeFromSnapshot, type SchemaChange, type Snapshot } from '../src/migrate/analyze'
+import pg from 'pg'
+import { withTestDatabase } from './helpers/db'
+import { analyzeSchemaChange, planMigration, removalMigration, removeFromSnapshot, type SchemaChange, type Snapshot } from '../src/migrate/analyze'
 
 type Column = { type?: string; notNull?: boolean; default?: string }
 const table = (columns: Record<string, Column>) => ({
@@ -298,5 +300,38 @@ describe('removeFromSnapshot against drizzle-kit', () => {
     const phaseOne: string[] = await generateMigration(before, reduced)
     expect(phaseOne.join('\n')).toContain('DROP TABLE "coins"')
     expect(await generateMigration(reduced, after)).toEqual([])
+  })
+})
+
+describe('a confirmed collection drop runs on real Postgres', () => {
+  test('phase 1 and phase 2 both succeed and coins is gone', async () => {
+    const { generateMigration } = createRequire(import.meta.url)('drizzle-kit/api')
+    const before = task2('20261118_164330_add_office.json')
+    const after = task2('20261118_164426_remove_coins.json.rejected')
+    for (const name of ['public.typewriters', 'public.office_machines']) after.tables[name] = before.tables[name]
+    const latest = '20261118_164330_add_office'
+    const result = planMigration(analyzeSchemaChange(before, after), {
+      confirm: [`drop table coins @ ${latest}`, `drop column featured_rels.coins_id @ ${latest}`], latestMigration: latest, tablesWithRows: new Set(), before,
+    })
+    if (result.kind !== 'apply') throw new Error(result.kind === 'stop' ? result.message : 'none')
+    await withTestDatabase(async (databaseUrl) => {
+      const client = new pg.Client({ connectionString: databaseUrl })
+      await client.connect()
+      try {
+        for (const statement of await generateMigration({ ...before, tables: {}, enums: {} }, before)) await client.query(statement)
+        await client.query(`INSERT INTO coins (id, title) VALUES (1, 'penny')`)
+        await client.query('INSERT INTO featured (id) VALUES (1)')
+        await client.query(`INSERT INTO featured_rels ("order", parent_id, path, coins_id) VALUES (1, 1, 'items', 1)`)
+        const { statements, snapshot } = await removalMigration(before, result.removals)
+        await client.query('BEGIN')
+        for (const statement of statements) await client.query(statement)
+        for (const statement of await generateMigration(snapshot, after)) await client.query(statement)
+        await client.query('COMMIT')
+        const found = await client.query(`SELECT to_regclass('public.coins') AS coins`)
+        expect(found.rows[0].coins).toBeNull()
+      } finally {
+        await client.end()
+      }
+    })
   })
 })

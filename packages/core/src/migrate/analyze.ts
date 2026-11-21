@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module'
+
 export type Snapshot = { tables: Record<string, any>; enums: Record<string, any> } & Record<string, unknown>
 
 export type SchemaChange = {
@@ -221,6 +223,15 @@ export function planMigration(
   return changed ? { kind: 'apply', removals } : { kind: 'none' }
 }
 
+// Postgres drops foreign keys that point at a dropped table.
+function dropForeignKeysTo(snapshot: Snapshot, table: string) {
+  for (const other of Object.values<any>(snapshot.tables)) {
+    for (const [name, foreignKey] of Object.entries<any>(other.foreignKeys ?? {})) {
+      if (foreignKey.tableTo === table) delete other.foreignKeys[name]
+    }
+  }
+}
+
 export function removeFromSnapshot(before: Snapshot, removals: Removal[]): Snapshot {
   const snapshot = structuredClone(before)
   const removeColumn = (tableEntry: any, column: string) => {
@@ -232,7 +243,7 @@ export function removeFromSnapshot(before: Snapshot, removals: Removal[]): Snaps
     for (const [name, foreignKey] of Object.entries<any>(tableEntry.foreignKeys ?? {})) {
       if (foreignKey.columnsFrom?.includes(column)) delete tableEntry.foreignKeys[name]
     }
-    for (const section of ['uniqueConstraints', 'checkConstraints', 'compositePrimaryKeys']) {
+    for (const section of ['uniqueConstraints', 'compositePrimaryKeys']) {
       for (const [name, constraint] of Object.entries<any>(tableEntry[section] ?? {})) {
         if (constraint.columns?.includes(column)) delete tableEntry[section][name]
       }
@@ -250,12 +261,20 @@ export function removeFromSnapshot(before: Snapshot, removals: Removal[]): Snaps
       continue
     }
     delete snapshot.tables[tableKey]
-    // Postgres drops foreign keys that point at a dropped table.
-    for (const other of Object.values<any>(snapshot.tables)) {
-      for (const [name, foreignKey] of Object.entries<any>(other.foreignKeys ?? {})) {
-        if (foreignKey.tableTo === table) delete other.foreignKeys[name]
-      }
-    }
+    dropForeignKeysTo(snapshot, table)
   }
   return snapshot
+}
+
+// Phase 1: the SQL that carries out the confirmed removals, and the snapshot as it stands afterwards.
+// DROP TABLE ... CASCADE already drops the foreign keys that point at the table. So the SQL is built from a
+// copy of `before` without those keys, or Postgres would fail on a second DROP CONSTRAINT.
+export async function removalMigration(before: Snapshot, removals: Removal[]): Promise<{ statements: string[]; snapshot: Snapshot }> {
+  const { generateMigration } = createRequire(import.meta.url)('drizzle-kit/api')
+  const snapshot = removeFromSnapshot(before, removals)
+  const withoutCascadedKeys = structuredClone(before)
+  for (const { table, column, enum: enumName } of removals) {
+    if (column === undefined && enumName === undefined) dropForeignKeysTo(withoutCascadedKeys, table)
+  }
+  return { statements: await generateMigration(withoutCascadedKeys, snapshot), snapshot }
 }
