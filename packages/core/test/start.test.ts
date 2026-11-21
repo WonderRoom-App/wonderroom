@@ -1,5 +1,7 @@
-import { describe, expect, test } from 'vitest'
-import { expectExit, withInstall } from './helpers/install'
+import { afterEach, describe, expect, test } from 'vitest'
+import { expectExit, stopStarts, withInstall } from './helpers/install'
+
+afterEach(stopStarts)
 
 const needs = (name: string, ...requires: string[]) => ({ use: 'toy-needs', name, requires })
 

@@ -1,8 +1,10 @@
-import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import pg from 'pg'
-import { describe, expect, test } from 'vitest'
-import { coins, curios, expectExit, toy, text, withInstall } from './helpers/install'
+import { afterEach, describe, expect, test } from 'vitest'
+import { coins, curios, type Entry, expectExit, stopStarts, toy, text, withInstall } from './helpers/install'
+
+afterEach(stopStarts)
 import { withTestDatabase } from './helpers/db'
 
 const confirmLine = (output: string, action: string) => {
@@ -17,6 +19,19 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       install.plugins([curios])
       expectExit(await install.start(), 0)
       for (const table of ['curios', 'items', 'users']) expect(await install.tableExists(table)).toBe(true)
+    }))
+
+  test('a start with nothing to change exits on its own', () =>
+    withInstall(async (install) => {
+      install.plugins([curios])
+      expectExit(await install.start(), 0)
+      let timer: NodeJS.Timeout | undefined
+      const limit = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('the second start was still running after 60 s')), 60_000)))
+      try {
+        expectExit(await Promise.race([install.start(), limit]), 0)
+      } finally {
+        clearTimeout(timer)
+      }
     }))
 
   test('adding an item type keeps the rows', () =>
@@ -112,6 +127,30 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       expectExit(await install.start(), 0)
     }))
 
+  test('when the drop applies and the next migration fails, the drop stays and the next start recovers', () =>
+    withInstall(async (install) => {
+      const stamps = (material: Entry) => toy('stamps', [material])
+      install.plugins([stamps(text('material')), coins])
+      expectExit(await install.start(), 0)
+      await install.sql(`insert into stamps (title, material) values ('Penny Black', 'paper'), ('Inverted Jenny', 'paper')`)
+      await install.sql(`insert into coins (title) values ('Penny')`)
+      const before = install.files()
+      // Phase 1 drops coins. Phase 2 adds a unique index that the two stamps rows break.
+      install.plugins([stamps(text('material', { unique: true }))])
+      const line = confirmLine((await install.start()).output, 'drop table coins')
+      install.plugins([stamps(text('material', { unique: true }))], [line])
+      expectExit(await install.start(), 1)
+      expect(await install.tableExists('coins')).toBe(false)
+      const kept = install.files().filter((file) => !before.includes(file))
+      expect(kept.map((file) => file.replace(/^\d{8}_\d{6}_/, ''))).toEqual(['wonderroom_removals.json', 'wonderroom_removals.ts'])
+      const applied = (await install.sql('select name from payload_migrations order by name')).map(({ name }) => name)
+      expect(applied).toEqual(install.files().filter((file) => file.endsWith('.json')).map((file) => file.slice(0, -'.json'.length)))
+
+      install.plugins([stamps(text('material'))])
+      expectExit(await install.start(), 0)
+      expect(await install.sql('select title from stamps order by title')).toEqual([{ title: 'Inverted Jenny' }, { title: 'Penny Black' }])
+    }))
+
   test('a start that died halfway leaves files the next start deletes', () =>
     withInstall(async (install) => {
       install.plugins([curios])
@@ -196,6 +235,24 @@ describe('the migrate command', { timeout: 180_000 }, () => {
       expect(stopped.output).toContain("can't find pg_dump")
       expect(await install.tableExists('coins')).toBe(true)
       expect(install.files()).toEqual(files)
+    }))
+
+  test('a failed backup leaves no dump file', () =>
+    withInstall(async (install) => {
+      install.plugins([curios, coins])
+      expectExit(await install.start(), 0)
+      install.plugins([curios])
+      const line = confirmLine((await install.start()).output, 'drop table coins')
+      install.plugins([curios], [line])
+      // A pg_dump that writes part of a file, then fails.
+      const bin = join(install.dataDir, 'bin')
+      mkdirSync(bin)
+      writeFileSync(join(bin, 'pg_dump'), '#!/bin/sh\nfor arg; do case $arg in --file=*) printf partial > "${arg#--file=}";; esac; done\nexit 1\n', { mode: 0o755 })
+      const stopped = await install.start({ PATH: `${bin}${delimiter}${process.env.PATH}` })
+      expectExit(stopped, 1)
+      expect(stopped.output).toContain('the database backup failed')
+      expect(readdirSync(join(install.dataDir, 'backups'))).toEqual([])
+      expect(await install.tableExists('coins')).toBe(true)
     }))
 
   test('a dev push row stops the start', () =>
