@@ -9,7 +9,7 @@
   "scripts": {
     "test": "npm test --workspaces --if-present",
     "dev": "npm run dev -w app",
-    "db:up": "docker compose -f compose.dev.yml up -d",
+    "db:up": "docker compose -f compose.dev.yml up -d --wait",
     "start": "npm run start:engine -w app"
   },
   "engines": {

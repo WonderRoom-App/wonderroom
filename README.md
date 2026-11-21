@@ -31,6 +31,13 @@ Each start reads this file. A new plugin adds its tables. A removed plugin stops
 
 If a plugin needs another plugin, list both. A missing or circular requirement stops the start with a message that names the plugins.
 
+The start also stops in these cases:
+
+- A new required field has no default, and its table already has rows. The same applies to a field that becomes required.
+- The migration files and the database disagree. This covers a dev push row, a missing file, an out-of-order file, and an empty database with a full migrations folder.
+
+Each message says what to do.
+
 ## Start commands
 
 - `npm run migrate -w app` brings the database in line with `plugins.yml`, or stops and says why.
