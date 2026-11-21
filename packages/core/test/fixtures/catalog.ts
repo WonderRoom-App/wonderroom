@@ -43,6 +43,8 @@ export const toyLedger = definePlugin({
 
 export const catalog: Catalog = {
   curios,
+  // plugins.yml: `use: toy-item` with `slug:` and optional `extraFields:`.
+  'toy-item': (settings) => toyItem(settings as Parameters<typeof toyItem>[0]),
   featured: () => toyFeatured,
   ledger: () => toyLedger,
 }

@@ -285,7 +285,7 @@ test('the hint says where the line goes', () => {
   expect(stopMessage(plan(emptyChange({ removedTables: ['coins'] })))).toContain('add this line under confirm: in plugins.yml:')
 })
 
-describe('removeFromSnapshot against drizzle-kit', () => {
+describe('removalMigration against drizzle-kit', () => {
   test('phase 2 after a confirmed collection drop has nothing left to drop', async () => {
     const { generateMigration } = createRequire(import.meta.url)('drizzle-kit/api')
     const before = task2('20261118_164330_add_office.json')
@@ -296,9 +296,8 @@ describe('removeFromSnapshot against drizzle-kit', () => {
       confirm: [`drop table coins @ ${latest}`, `drop column featured_rels.coins_id @ ${latest}`], latestMigration: latest, tablesWithRows: new Set(), before,
     })
     if (result.kind !== 'apply') throw new Error(result.kind === 'stop' ? result.message : 'none')
-    const reduced = removeFromSnapshot(before, result.removals)
-    const phaseOne: string[] = await generateMigration(before, reduced)
-    expect(phaseOne.join('\n')).toContain('DROP TABLE "coins"')
+    const { statements, snapshot: reduced } = await removalMigration(before, result.removals, generateMigration)
+    expect(statements.join('\n')).toContain('DROP TABLE "coins"')
     expect(await generateMigration(reduced, after)).toEqual([])
   })
 })
@@ -322,7 +321,7 @@ describe('a confirmed collection drop runs on real Postgres', () => {
         await client.query(`INSERT INTO coins (id, title) VALUES (1, 'penny')`)
         await client.query('INSERT INTO featured (id) VALUES (1)')
         await client.query(`INSERT INTO featured_rels ("order", parent_id, path, coins_id) VALUES (1, 1, 'items', 1)`)
-        const { statements, snapshot } = await removalMigration(before, result.removals)
+        const { statements, snapshot } = await removalMigration(before, result.removals, generateMigration)
         await client.query('BEGIN')
         for (const statement of statements) await client.query(statement)
         for (const statement of await generateMigration(snapshot, after)) await client.query(statement)

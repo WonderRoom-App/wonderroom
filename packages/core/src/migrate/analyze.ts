@@ -1,5 +1,3 @@
-import { createRequire } from 'node:module'
-
 export type Snapshot = { tables: Record<string, any>; enums: Record<string, any> } & Record<string, unknown>
 
 export type SchemaChange = {
@@ -269,8 +267,12 @@ export function removeFromSnapshot(before: Snapshot, removals: Removal[]): Snaps
 // Phase 1: the SQL that carries out the confirmed removals, and the snapshot as it stands afterwards.
 // DROP TABLE ... CASCADE already drops the foreign keys that point at the table. So the SQL is built from a
 // copy of `before` without those keys, or Postgres would fail on a second DROP CONSTRAINT.
-export async function removalMigration(before: Snapshot, removals: Removal[]): Promise<{ statements: string[]; snapshot: Snapshot }> {
-  const { generateMigration } = createRequire(import.meta.url)('drizzle-kit/api')
+// `generateMigration` comes from payload.db.requireDrizzleKit(), so both phases use the same drizzle-kit.
+export async function removalMigration(
+  before: Snapshot,
+  removals: Removal[],
+  generateMigration: (prev: any, cur: any) => Promise<string[]>,
+): Promise<{ statements: string[]; snapshot: Snapshot }> {
   const snapshot = removeFromSnapshot(before, removals)
   const withoutCascadedKeys = structuredClone(before)
   for (const { table, column, enum: enumName } of removals) {
