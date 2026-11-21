@@ -1,2 +1,6 @@
 .superpowers/
 node_modules/
+data/
+app/.env
+.tmp/
+app/AGENTS.md

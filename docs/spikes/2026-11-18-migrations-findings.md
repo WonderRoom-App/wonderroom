@@ -116,3 +116,25 @@ Open for M1 (builder's call):
   database table as well.
 - DT's 52 existing migrations stay behind in the DT repo. DT's install starts with a fresh
   snapshot of its current schema. The one-way data reshape is M7's job.
+
+## 3.94.1 note
+
+Date: 2026-11-21. Payload and `@payloadcms/db-postgres` 3.94.1, Node 24.22.3, Postgres 16. The
+guard tests in `packages/core/test/migrate.test.ts` repeat the experiments above. These results
+differ from 3.85.0 or are new:
+
+- **Rename with no terminal:** `migrate:create` now exits **13**, not 0. Node reports an
+  unsettled top-level await in `payload/bin.js`. It still writes no migration. The guard does
+  not depend on the exit code: it stops on the rename before the step runs, checks that a file
+  appeared, and has a time limit.
+- **Remove a plugin:** unchanged. `migrate:create` writes `DROP TABLE "coins" CASCADE` and
+  exits 0.
+- **Migration files must sit under a folder with `node_modules`.** Each generated file imports
+  `@payloadcms/db-postgres`, and Node resolves that from the file's folder. With the data folder
+  in the system temp folder, `payload migrate` fails: `Cannot find module
+  '@payloadcms/db-postgres'`. The tests keep their data folders under `packages/core/.tmp/`.
+  The image (M6) must mount the data folder inside the app's tree.
+- **A confirmed `retype` runs only when Postgres can cast.** Text to number fails at `migrate`:
+  `column "weight" cannot be cast automatically to type numeric`. The guard deletes the
+  unapplied file and stops. Data is kept, but the owner can't make that change in M1.
+- **`payload_migrations.batch` is `numeric`,** so `pg` returns it as text (`'-1'`).
