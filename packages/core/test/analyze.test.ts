@@ -13,11 +13,19 @@ const snapshot = (tables: Record<string, Record<string, Column>>, enums: string[
 })
 const emptyChange = (over: Partial<SchemaChange> = {}): SchemaChange => ({
   addedTables: [], removedTables: [], addedColumns: [], removedColumns: [],
-  addedEnums: [], removedEnums: [], retypedColumns: [], newlyNotNull: [], ...over,
+  addedEnums: [], removedEnums: [], changedEnums: [], retypedColumns: [], newlyNotNull: [], ...over,
 })
 const LATEST = '20261118_164300_wonderroom'
-const plan = (change: SchemaChange, confirm: string[] = [], tablesWithRows: string[] = [], latestMigration: string | null = LATEST) =>
-  planMigration(change, { confirm, latestMigration, tablesWithRows: new Set(tablesWithRows) })
+const emptySnapshot = snapshot({})
+const plan = (change: SchemaChange, confirm: string[] = [], tablesWithRows: string[] = [], latestMigration: string | null = LATEST, before: Snapshot = emptySnapshot) =>
+  planMigration(change, { confirm, latestMigration, tablesWithRows: new Set(tablesWithRows), before })
+// Adds a Payload-style parent foreign key (child.<column> -> parent.id) to a snapshot.
+const withParentKey = (snap: Snapshot, child: string, parent: string, column = 'parent_id'): Snapshot => {
+  snap.tables[`public.${child}`].foreignKeys = {
+    [`${child}_${column}_fk`]: { name: `${child}_${column}_fk`, tableFrom: child, tableTo: parent, columnsFrom: [column], columnsTo: ['id'] },
+  }
+  return snap
+}
 const stopMessage = (result: ReturnType<typeof plan>) => {
   if (result.kind !== 'stop') throw new Error(`expected stop, got ${result.kind}`)
   return result.message
@@ -87,35 +95,82 @@ describe('planMigration', () => {
     expect(plan(emptyChange({ removedTables: ['coins'], addedTables: ['stamps'] }), [dropKey]).kind).toBe('apply')
   })
   test('child tables, enums and payload columns ride on the table drop', () => {
+    const before = snapshot({ coins: { id: {}, status: { type: 'enum_coins_status' } }, coins_rels: { id: {} }, coins_photos: { id: {} }, coins_photos_tags: { id: {} } }, ['enum_coins_status'])
+    withParentKey(before, 'coins_rels', 'coins')
+    withParentKey(before, 'coins_photos', 'coins', '_parent_id')
+    withParentKey(before, 'coins_photos_tags', 'coins_photos', '_parent_id')
     const change = emptyChange({
-      removedTables: ['coins', 'coins_rels', 'coins_photos'],
+      removedTables: ['coins', 'coins_rels', 'coins_photos', 'coins_photos_tags'],
       removedEnums: ['enum_coins_status'],
       removedColumns: [
         { table: 'payload_locked_documents_rels', column: 'coins_id' },
         { table: 'payload_preferences_rels', column: 'coins_id' },
       ],
     })
-    const result = plan(change, [dropKey])
-    expect(result).toEqual({
+    expect(plan(change, [dropKey], [], LATEST, before)).toEqual({
       kind: 'apply',
       removals: [
         { key: dropKey, table: 'coins' },
         { key: dropKey, table: 'coins_rels' },
         { key: dropKey, table: 'coins_photos' },
+        { key: dropKey, table: 'coins_photos_tags' },
         { key: dropKey, table: 'coins', enum: 'enum_coins_status' },
         { key: dropKey, table: 'payload_locked_documents_rels', column: 'coins_id' },
         { key: dropKey, table: 'payload_preferences_rels', column: 'coins_id' },
       ],
     })
   })
+  test('an unrelated table with a matching prefix needs its own key', () => {
+    const before = withParentKey(snapshot({ coins: {}, coins_rels: {}, coins_extra: {} }), 'coins_rels', 'coins')
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'coins_rels', 'coins_extra'] }), [dropKey], [], LATEST, before))
+    expect(message).toContain(`drop table coins_extra @ ${LATEST}`)
+    expect(message).not.toContain(`drop table coins @ ${LATEST}`)
+  })
+  test('an enum used by a surviving table is not covered', () => {
+    const before = snapshot({ coins: { status: { type: 'enum_coins_status' } }, other: { status: { type: 'enum_coins_status' } } }, ['enum_coins_status'])
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins'], removedEnums: ['enum_coins_status'] }), [dropKey], [], LATEST, before))
+    expect(message).toContain('enum_coins_status')
+  })
+  test('confirmed retype applies and removes nothing', () => {
+    const change = emptyChange({ retypedColumns: [{ table: 'coins', column: 'year', from: 'varchar', to: 'integer' }] })
+    expect(plan(change, [`retype coins.year @ ${LATEST}`])).toEqual({ kind: 'apply', removals: [] })
+  })
+  describe('changed enum values', () => {
+    const key = `drop values enum_coins_grade.good,fair @ ${LATEST}`
+    test('added values alone apply', () => {
+      const change = emptyChange({ changedEnums: [{ enum: 'enum_coins_grade', removedValues: [], addedValues: ['mint'] }] })
+      expect(plan(change)).toEqual({ kind: 'apply', removals: [] })
+    })
+    test('removed values stop, with the key and a note about rows', () => {
+      const change = emptyChange({ changedEnums: [{ enum: 'enum_coins_grade', removedValues: ['good', 'fair'], addedValues: [] }] })
+      const message = stopMessage(plan(change))
+      expect(message).toContain(key)
+      expect(message).toContain('Change the rows')
+    })
+    test('removed values apply when confirmed', () => {
+      const change = emptyChange({ changedEnums: [{ enum: 'enum_coins_grade', removedValues: ['good', 'fair'], addedValues: ['mint'] }] })
+      expect(plan(change, [key])).toEqual({ kind: 'apply', removals: [] })
+    })
+  })
+  test('analyze reports changed enum values in before-order', () => {
+    const before = snapshot({}, ['enum_a_s'])
+    before.enums['public.enum_a_s'].values = ['x', 'y', 'z']
+    const after = snapshot({}, ['enum_a_s'])
+    after.enums['public.enum_a_s'].values = ['x', 'w', 'z']
+    const c = analyzeSchemaChange(before, after)
+    expect(c.changedEnums).toEqual([{ enum: 'enum_a_s', removedValues: ['y'], addedValues: ['w'] }])
+    expect(c.addedEnums).toEqual([])
+  })
   test('only the first line is needed for a table with children', () => {
-    const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'coins_rels'] })))
+    const before = withParentKey(snapshot({ coins: {}, coins_rels: {} }), 'coins_rels', 'coins')
+    const message = stopMessage(plan(emptyChange({ removedTables: ['coins', 'coins_rels'] }), [], [], LATEST, before))
     expect(message).toContain(dropKey)
     expect(message).not.toContain('coins_rels @')
   })
   test('a confirmed drop does not cover a table that still exists', () => {
     // coins_extra exists in both snapshots, so it is not in removedTables and has no removal.
-    const result = plan(emptyChange({ removedTables: ['coins', 'coins_rels'] }), [dropKey])
+    const before = withParentKey(snapshot({ coins: {}, coins_rels: {} }), 'coins_rels', 'coins')
+    const result = plan(emptyChange({ removedTables: ['coins', 'coins_rels'] }), [dropKey], [], LATEST, before)
     expect(result).toMatchObject({ kind: 'apply' })
     expect(result.kind === 'apply' && result.removals.map((r) => r.table)).toEqual(['coins', 'coins_rels'])
   })
@@ -140,7 +195,8 @@ describe('planMigration', () => {
   })
   test('confirmed column drop applies, and covers its enum', () => {
     const key = `drop column coins.status @ ${LATEST}`
-    const result = plan(emptyChange({ removedColumns: [{ table: 'coins', column: 'status' }], removedEnums: ['enum_coins_status'] }), [key])
+    const before = snapshot({ coins: { status: { type: 'enum_coins_status' } } }, ['enum_coins_status'])
+    const result = plan(emptyChange({ removedColumns: [{ table: 'coins', column: 'status' }], removedEnums: ['enum_coins_status'] }), [key], [], LATEST, before)
     expect(result).toEqual({ kind: 'apply', removals: [
       { key, table: 'coins', enum: 'enum_coins_status' },
       { key, table: 'coins', column: 'status' },

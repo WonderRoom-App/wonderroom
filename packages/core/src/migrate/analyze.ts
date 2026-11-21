@@ -7,6 +7,7 @@ export type SchemaChange = {
   removedColumns: { table: string; column: string }[]
   addedEnums: string[]
   removedEnums: string[]
+  changedEnums: { enum: string; removedValues: string[]; addedValues: string[] }[]
   retypedColumns: { table: string; column: string; from: string; to: string }[]
   newlyNotNull: { table: string; column: string }[]
 }
@@ -39,8 +40,16 @@ export function analyzeSchemaChange(before: Snapshot, after: Snapshot): SchemaCh
     removedColumns: [],
     addedEnums: afterEnums.filter((name) => !beforeEnums.includes(name)),
     removedEnums: beforeEnums.filter((name) => !afterEnums.includes(name)),
+    changedEnums: [],
     retypedColumns: [],
     newlyNotNull: [],
+  }
+  for (const name of beforeEnums.filter((enumName) => afterEnums.includes(enumName))) {
+    const was: string[] = before.enums[findKey(before.enums, name)!].values ?? []
+    const now: string[] = after.enums[findKey(after.enums, name)!].values ?? []
+    const removedValues = was.filter((value) => !now.includes(value))
+    const addedValues = now.filter((value) => !was.includes(value))
+    if (removedValues.length || addedValues.length) change.changedEnums.push({ enum: name, removedValues, addedValues })
   }
   for (const table of beforeTables.filter((name) => afterTables.includes(name))) {
     const was = columnsOf(before, table)
@@ -66,9 +75,9 @@ const PAYLOAD_RELS_TABLES = ['payload_locked_documents_rels', 'payload_preferenc
 
 export function planMigration(
   change: SchemaChange,
-  input: { confirm: string[]; latestMigration: string | null; tablesWithRows: Set<string> },
+  input: { confirm: string[]; latestMigration: string | null; tablesWithRows: Set<string>; before: Snapshot },
 ): MigrationPlan {
-  const { confirm, latestMigration, tablesWithRows } = input
+  const { confirm, latestMigration, tablesWithRows, before } = input
   const problems: string[] = []
   const removals: Removal[] = []
   const isConfirmed = (key: string) => confirm.includes(key)
@@ -81,10 +90,26 @@ export function planMigration(
         : `${problem} To allow this, add ${keys.length > 1 ? 'these lines' : 'this line'} to confirm: in plugins.yml:\n${keys.join("\n")}`,
     )
 
-  // Tables. A removed table with another removed table as its name prefix is a child table.
-  const isChildTable = (table: string) => change.removedTables.some((other) => other !== table && table.startsWith(`${other}_`))
-  const removedRoots = change.removedTables.filter((table) => !isChildTable(table))
-  const rootOf = (table: string) => removedRoots.find((root) => table === root || table.startsWith(`${root}_`))!
+  // Tables. A removed table is a child when it has a Payload parent key (parent_id or _parent_id)
+  // to another removed table. Only names that share a prefix by accident are not children.
+  const removedTableSet = new Set(change.removedTables)
+  const parentOf = (table: string): string | undefined => {
+    const foreignKeys = before.tables[findKey(before.tables, table) ?? '']?.foreignKeys ?? {}
+    const parentKey = Object.values<any>(foreignKeys).find(
+      (fk) => fk.tableFrom === table && removedTableSet.has(fk.tableTo) && fk.tableTo !== table && fk.columnsFrom.some((column: string) => column === 'parent_id' || column === '_parent_id'),
+    )
+    return parentKey?.tableTo
+  }
+  const rootOf = (table: string) => {
+    let root = table
+    for (let hops = 0; hops <= change.removedTables.length; hops++) {
+      const parent = parentOf(root)
+      if (parent === undefined) return root
+      root = parent
+    }
+    return table // a foreign key loop: the table asks for its own key
+  }
+  const removedRoots = change.removedTables.filter((table) => rootOf(table) === table)
   const confirmedRoots = new Set<string>()
   const unconfirmedRoots: string[] = []
   for (const root of removedRoots) {
@@ -99,20 +124,25 @@ export function planMigration(
       : ''
     needConfirm(`Table ${root} is gone from the schema. Its rows would be lost.${swap}`, [keyFor(`drop table ${root}`)])
   }
+  const tableCoverKey = (table: string) => (confirmedRoots.has(rootOf(table)) ? keyFor(`drop table ${rootOf(table)}`)! : undefined)
   for (const table of change.removedTables) {
-    const root = rootOf(table)
-    if (confirmedRoots.has(root)) removals.push({ key: keyFor(`drop table ${root}`)!, table })
+    const key = tableCoverKey(table)
+    if (key) removals.push({ key, table })
   }
 
-  // Enums. A confirmed table drop covers enum_<table>_*, a confirmed column drop covers enum_<table>_<column>.
+  // Enums. An enum is covered when every column that uses it sits in a covered table or a confirmed dropped column.
+  const confirmedColumnKey = (table: string, column: string) => {
+    const key = keyFor(`drop column ${table}.${column}`)
+    return key !== null && isConfirmed(key) ? key : undefined
+  }
   const enumCover = (enumName: string): { key: string; table: string } | undefined => {
-    for (const root of confirmedRoots) {
-      if (enumName.startsWith(`enum_${root}_`)) return { key: keyFor(`drop table ${root}`)!, table: root }
-    }
-    for (const { table, column } of change.removedColumns) {
-      const key = keyFor(`drop column ${table}.${column}`)
-      if (enumName === `enum_${table}_${column}` && key !== null && isConfirmed(key)) return { key, table }
-    }
+    const users = Object.values<any>(before.tables).flatMap((tableEntry) =>
+      Object.values<any>(tableEntry.columns).filter((column) => column.type === enumName).map((column) => ({ table: tableEntry.name as string, column: column.name as string })),
+    )
+    if (users.length === 0) return undefined
+    const keys = users.map(({ table, column }) => ({ table, key: tableCoverKey(table) ?? confirmedColumnKey(table, column) }))
+    if (keys.some(({ key }) => key === undefined)) return undefined
+    return { key: keys[0].key!, table: keys[0].table }
   }
   const uncoveredEnums: string[] = []
   for (const enumName of change.removedEnums) {
@@ -122,17 +152,23 @@ export function planMigration(
   }
   if (uncoveredEnums.length) {
     const swap = change.addedEnums.length ? ` Enum ${list(change.addedEnums)} is new. The engine can't tell a rename from a swap.` : ''
-    problems.push(`Enum ${list(uncoveredEnums)} is gone from the schema, and no confirmed table or column drop covers it.${swap} Put the field back, or confirm the drop of its table or column.`)
+    problems.push(`Enum ${list(uncoveredEnums)} is gone from the schema, and no confirmed table or column drop covers every column that uses it.${swap} Put the field back, or confirm the drop of its table or column.`)
+  }
+  for (const { enum: enumName, removedValues } of change.changedEnums) {
+    if (removedValues.length === 0) continue
+    const key = keyFor(`drop values ${enumName}.${removedValues.join(',')}`)
+    if (key !== null && isConfirmed(key)) continue
+    needConfirm(`Enum ${enumName} loses the values ${list(removedValues)}. Change the rows that hold these values first.`, [key])
   }
 
   // Columns.
-  const removedTableSet = new Set(change.removedTables)
   const columnsByTable = new Map<string, string[]>()
   for (const { table, column } of change.removedColumns) {
     const owner = column.endsWith('_id') ? column.slice(0, -3) : null
     if (PAYLOAD_RELS_TABLES.includes(table) && owner !== null && removedTableSet.has(owner)) {
       // Covered by the table drop. If that drop is not confirmed, the table problem above already stops the start.
-      if (confirmedRoots.has(rootOf(owner))) removals.push({ key: keyFor(`drop table ${rootOf(owner)}`)!, table, column })
+      const key = tableCoverKey(owner)
+      if (key) removals.push({ key, table, column })
       continue
     }
     const key = keyFor(`drop column ${table}.${column}`)
@@ -152,8 +188,9 @@ export function planMigration(
 
   for (const { table, column, from, to } of change.retypedColumns) {
     const key = keyFor(`retype ${table}.${column}`)
-    if (key !== null && isConfirmed(key)) removals.push({ key, table, column })
-    else needConfirm(`Column ${table}.${column} changes type from ${from} to ${to}. The data may not convert.`, [key])
+    // Confirmed: no removal. Drizzle's own SET DATA TYPE keeps the data.
+    if (key !== null && isConfirmed(key)) continue
+    needConfirm(`Column ${table}.${column} changes type from ${from} to ${to}. The data may not convert.`, [key])
   }
 
   const needsDefault = [
